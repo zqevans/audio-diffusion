@@ -24,7 +24,7 @@ class Stereo(nn.Module):
   def __call__(self, signal):
     signal_shape = signal.shape
     # Check if it's mono
-    if len(signal_shape) == 1: # s ->2, s
+    if len(signal_shape) == 1: # s -> 2, s
         signal = signal.unsqueeze(0).repeat(2, 1)
     elif len(signal_shape) == 2:
         if signal_shape[0] == 1: #1, s -> 2, s
