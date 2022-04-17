@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 # from einops import rearrange
-from pytorch_lightning import Callback, LightningModule, Trainer, loggers, callbacks
+import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 import torch
 from torch import optim
@@ -21,7 +21,6 @@ from model import AudioDiffusion
 from dataset import SampleDataset
 
 # Define utility functions
-
 @contextmanager
 def train_mode(model, mode=True):
     """A context manager that places a model into training mode and restores
@@ -59,7 +58,7 @@ def ema_update(model, averaged_model, decay):
         averaged_buffers[name].copy_(buf)
 
 
-class LightningDiffusion(LightningModule):
+class LightningDiffusion(pl.LightningModule):
     def __init__(self):
         super().__init__()
         self.model = AudioDiffusion()
@@ -105,7 +104,7 @@ class LightningDiffusion(LightningModule):
         ema_update(self.model, self.model_ema, decay)
 
 
-class DemoCallback(Callback):
+class DemoCallback(pl.Callback):
     @rank_zero_only
     @torch.no_grad()
     def on_batch_end(self, trainer, module):
@@ -131,7 +130,7 @@ class DemoCallback(Callback):
         trainer.logger.experiment.log(log_dict, step=trainer.global_step)
 
 
-class ExceptionCallback(Callback):
+class ExceptionCallback(pl.Callback):
     def on_exception(self, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
@@ -139,10 +138,12 @@ class ExceptionCallback(Callback):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
-                   help='the training data directory')           
+                   help='the training data directory')         
+    p.add_argument('--num-workers', type=int, default=2,
+                   help='number of CPU workers for the DataLoader')   
     args = p.parse_args()
 
-    batch_size = 512
+    batch_size = 64
 
     # sample size needs to be a multiple of 2^16 for u-net compat
     args.training_sample_size = 131072 # (2 ^ 16) * 2, around 3 seconds at 44.1k
@@ -154,16 +155,16 @@ def main():
     )
     train_set = SampleDataset([args.training_dir], train_tf)
     train_dl = data.DataLoader(train_set, batch_size, shuffle=True,
-                               num_workers=96, persistent_workers=True, pin_memory=True)
+                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
     model = LightningDiffusion()
-    wandb_logger = loggers.WandbLogger(project="break-diffusion")
+    wandb_logger = pl.loggers.WandbLogger(project="break-diffusion")
     wandb_logger.watch(model.model)
-    ckpt_callback = callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
+    ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
     demo_callback = DemoCallback()
     exc_callback = ExceptionCallback()
 
-    trainer = Trainer(
+    trainer = pl.Trainer(
         gpus=1,
         accelerator='ddp',
         precision=16,

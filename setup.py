@@ -6,5 +6,10 @@ setup(
     url='https://github.com/zqevans/audio-diffusion.git',
     author='Zach Evans',
     packages=find_packages(),    
-    install_requires=['numpy >= 1.11.1', 'matplotlib >= 1.5.1'],
+    install_requires=[
+        'torch',
+        'torchaudio',
+        'pytorch_lightning', 
+        'wandb'
+    ],
 )

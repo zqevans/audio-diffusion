@@ -1,0 +1,8 @@
+LICENSE
+README.md
+setup.py
+audio_diffusion.egg-info/PKG-INFO
+audio_diffusion.egg-info/SOURCES.txt
+audio_diffusion.egg-info/dependency_links.txt
+audio_diffusion.egg-info/requires.txt
+audio_diffusion.egg-info/top_level.txt
