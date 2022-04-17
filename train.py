@@ -15,10 +15,10 @@ from torch.utils import data
 import torchaudio
 import wandb
 
-from inference import sample
-from utils import Stereo, RandomGain, PadCrop, get_alphas_sigmas
-from model import AudioDiffusion
-from dataset import SampleDataset
+from audio_diffusion.inference import sample
+from audio_diffusion.utils import Stereo, RandomGain, PadCrop, get_alphas_sigmas
+from audio_diffusion.model import AudioDiffusion
+from audio_diffusion.dataset import SampleDataset
 
 # Define utility functions
 @contextmanager
