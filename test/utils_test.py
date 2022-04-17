@@ -6,7 +6,7 @@ import unittest
 class TestUtils(unittest.TestCase):
 
     def test_mid_side_encoding(self):
-        noise = torch.randn([1, 2, 131072], device='cuda')
+        noise = torch.randn([2, 131072], device='cuda')
         encoder = MidSideEncoding()
         decoder = MidSideDecoding()
 
