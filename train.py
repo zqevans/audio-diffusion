@@ -141,9 +141,11 @@ def main():
                    help='the training data directory')         
     p.add_argument('--num-workers', type=int, default=2,
                    help='number of CPU workers for the DataLoader')   
+    p.add_argument('--batch-size', type=int, default=8,
+                   help='number of audio samples per batch')   
+    p.add_argument('--num-gpus', type=int, default=1,
+                   help='number of GPUs to use for training')  
     args = p.parse_args()
-
-    batch_size = 64
 
     # sample size needs to be a multiple of 2^16 for u-net compat
     args.training_sample_size = 131072 # (2 ^ 16) * 2, around 3 seconds at 44.1k
@@ -154,7 +156,7 @@ def main():
         PadCrop(args.training_sample_size)
     )
     train_set = SampleDataset([args.training_dir], train_tf)
-    train_dl = data.DataLoader(train_set, batch_size, shuffle=True,
+    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
     model = LightningDiffusion()
@@ -165,7 +167,7 @@ def main():
     exc_callback = ExceptionCallback()
 
     trainer = pl.Trainer(
-        gpus=1,
+        gpus=args.num_gpus,
         accelerator='ddp',
         precision=16,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
