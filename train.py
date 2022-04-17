@@ -168,7 +168,7 @@ def main():
 
     trainer = pl.Trainer(
         gpus=args.num_gpus,
-        accelerator='ddp',
+       # accelerator='ddp',
         precision=16,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
