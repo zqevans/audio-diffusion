@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 # from einops import rearrange
-import pytorch_lightning as pl
+from pytorch_lightning import Callback, LightningModule, Trainer, loggers, callbacks
 from pytorch_lightning.utilities.distributed import rank_zero_only
 import torch
 from torch import optim
@@ -59,7 +59,7 @@ def ema_update(model, averaged_model, decay):
         averaged_buffers[name].copy_(buf)
 
 
-class LightningDiffusion(pl.LightningModule):
+class LightningDiffusion(LightningModule):
     def __init__(self):
         super().__init__()
         self.model = AudioDiffusion()
@@ -105,7 +105,7 @@ class LightningDiffusion(pl.LightningModule):
         ema_update(self.model, self.model_ema, decay)
 
 
-class DemoCallback(pl.Callback):
+class DemoCallback(Callback):
     @rank_zero_only
     @torch.no_grad()
     def on_batch_end(self, trainer, module):
@@ -131,7 +131,7 @@ class DemoCallback(pl.Callback):
         trainer.logger.experiment.log(log_dict, step=trainer.global_step)
 
 
-class ExceptionCallback(pl.Callback):
+class ExceptionCallback(Callback):
     def on_exception(self, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
@@ -157,13 +157,13 @@ def main():
                                num_workers=96, persistent_workers=True, pin_memory=True)
 
     model = LightningDiffusion()
-    wandb_logger = pl.loggers.WandbLogger(project="break-diffusion")
+    wandb_logger = loggers.WandbLogger(project="break-diffusion")
     wandb_logger.watch(model.model)
-    ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
+    ckpt_callback = callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
     demo_callback = DemoCallback()
     exc_callback = ExceptionCallback()
 
-    trainer = pl.Trainer(
+    trainer = Trainer(
         gpus=1,
         accelerator='ddp',
         precision=16,
