@@ -1,4 +1,4 @@
-from audio_diffusion.utils import MidSideEncoding, MidSideDecoding
+from diffusion.utils import MidSideEncoding, MidSideDecoding
 import torch
 
 def testMidSideEncoding():
