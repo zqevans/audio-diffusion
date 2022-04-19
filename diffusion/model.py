@@ -8,9 +8,6 @@ from torch.nn import functional as F
 
 from .utils import get_alphas_sigmas
 
-from RAVE.rave.pqmf import PQMF
-
-
 @torch.no_grad()
 def ema_update(model, averaged_model, decay):
     """Incorporates updated model parameters into an exponential moving averaged

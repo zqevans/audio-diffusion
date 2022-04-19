@@ -1,2 +1,6 @@
+auraloss
+einops
+torch
+torchaudio
 pytorch_lightning
 wandb

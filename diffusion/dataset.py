@@ -4,9 +4,9 @@ from torchaudio import transforms as T
 import random
 from glob import glob
 
-from RAVE.rave.pqmf import PQMF
+from .pqmf import CachedPQMF as PQMF
 
-from .utils import MidSideEncoding, Mono, Stereo, RandomGain, PadCrop
+from .utils import MidSideEncoding, Stereo, RandomGain, PadCrop
 
 class SampleDataset(torch.utils.data.Dataset):
   def __init__(self, paths, global_args):
@@ -14,12 +14,16 @@ class SampleDataset(torch.utils.data.Dataset):
     self.filenames = []
 
     self.transform = torch.nn.Sequential(
-        MidSideEncoding(),
+        #augmentations and normalization
         RandomGain(0.5, 1.0),
-        PadCrop(global_args.training_sample_size)  
+        PadCrop(global_args.training_sample_size),
+
+        #encoding
+        Stereo(),
+        MidSideEncoding()
     )
 
-    self.pqmf = PQMF(100, 128)
+    self.pqmf = PQMF(2, 100, 128)
 
     for path in paths:
       self.filenames += glob(f'{path}/**/*.wav', recursive=True)
@@ -38,9 +42,6 @@ class SampleDataset(torch.utils.data.Dataset):
 
       if self.transform is not None:
         audio = self.transform(audio)
-
-      #split and concat the channels
-      audio = torch.cat(torch.split(audio, 1, dim=1), dim=0)
 
       #PQMF-encode the audio
       audio = self.pqmf(audio)

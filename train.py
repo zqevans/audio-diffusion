@@ -15,8 +15,7 @@ import wandb
 from diffusion.inference import sample
 from diffusion.model import LightningDiffusion
 from diffusion.dataset import SampleDataset
-
-from RAVE.rave.pqmf import PQMF
+from diffusion.pqmf import CachedPQMF as PQMF
 from diffusion.utils import MidSideDecoding
 
 # Define utility functions
@@ -40,7 +39,7 @@ def eval_mode(model):
 class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
-        self.pqmf = PQMF(100, global_args.pqmf_bands)
+        self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
         self.ms_decoder = MidSideDecoding()
 
     @rank_zero_only
@@ -57,7 +56,7 @@ class DemoCallback(pl.Callback):
         fakes = self.pqmf.inverse(fakes)
 
         #restore stereo channels
-        
+
 
         log_dict = {}
         for i, fake in enumerate(fakes):
