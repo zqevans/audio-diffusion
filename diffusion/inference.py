@@ -1,6 +1,6 @@
 from tqdm import trange
 import torch
-from diffusion.utils import get_alphas_sigmas
+from .utils import get_alphas_sigmas
 
 @torch.no_grad()
 def sample(model, x, steps, eta):

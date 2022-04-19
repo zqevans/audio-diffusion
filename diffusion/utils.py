@@ -20,6 +20,10 @@ class PadCrop(nn.Module):
         output[:, :min(s, self.n_samples)] = signal[:, start:end]
         return output
 
+class Mono(nn.Module):
+  def __call__(self, signal):
+    return torch.mean(signal, dim=0) if len(signal.shape) > 1 else signal
+
 class Stereo(nn.Module):
   def __call__(self, signal):
     signal_shape = signal.shape

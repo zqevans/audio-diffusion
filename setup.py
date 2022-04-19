@@ -7,6 +7,7 @@ setup(
     author='Zach Evans',
     packages=find_packages(),    
     install_requires=[
+        'auraloss',
         'torch',
         'torchaudio',
         'pytorch_lightning', 
