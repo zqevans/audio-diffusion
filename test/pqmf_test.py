@@ -13,7 +13,7 @@ class TestPqmf(unittest.TestCase):
         decoded = pqmf.inverse(encoded)
         
         #the inverse has the same shape as the original
-        self.assertTrue(torch.equal(signal.shape, decoded.shape))
+        self.assertEqual(list(signal.shape), list(decoded.shape))
         
 
 if __name__ == '__main__':

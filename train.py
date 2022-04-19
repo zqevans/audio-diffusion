@@ -103,14 +103,19 @@ def main():
     demo_callback = DemoCallback()
     exc_callback = ExceptionCallback()
 
+    extra_trainer_args = {}
+
+    if (args.num_gpus > 1):
+        extra_trainer_args["accelerator"] = 'ddp'
+
     trainer = pl.Trainer(
         gpus=args.num_gpus,
-        accelerator='ddp',
         precision=16,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=10000000,
+        **extra_trainer_args
     )
 
     trainer.fit(model, train_dl)
