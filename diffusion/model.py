@@ -96,10 +96,13 @@ def expand_to_planes(input, shape):
 class AudioDiffusion(nn.Module):
     def __init__(self, *args):
         super().__init__()
-        c_mults = [128, 128, 256, 256] + [512] * 12
+        c_mults = [512, 512, 1024, 1024] + [2048]*4 
         depth = len(c_mults)
 
-        n_io_channels = 1 if args.mono else 2
+        #Number of input/output audio channels for the model
+        n_io_channels = args.pqmf_bands if args.mono else 2 * args.pqmf_bands
+
+        c_mults = [2*x for x in c_mults] if not args.mono else c_mults
 
         self.timestep_embed = FourierFeatures(1, 16)
 
@@ -147,9 +150,6 @@ class LightningDiffusion(pl.LightningModule):
         self.model = AudioDiffusion(*args)
         self.model_ema = deepcopy(self.model)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        
-        # 100 dB stopband attenuation, 64 sub-bands
-        self.pqmf = PQMF(100, 64)
 
     def forward(self, *args, **kwargs):
         if self.training:
@@ -161,9 +161,6 @@ class LightningDiffusion(pl.LightningModule):
 
     def eval_batch(self, batch):
         reals = batch[0]
-
-        #convert to PQMF
-        reals = self.pqmf(reals)
 
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)

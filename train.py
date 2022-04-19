@@ -37,17 +37,22 @@ def eval_mode(model):
     return train_mode(model, False)
 
 class DemoCallback(pl.Callback):
+    def __init__(self, *args):
+        super().__init__()
+        self.pqmf = PQMF(100, args.pqmf_bands)
+
     @rank_zero_only
     @torch.no_grad()
     def on_batch_end(self, trainer, module):
         if trainer.global_step % 1000 != 0:
             return
 
-        noise = torch.randn([4, 2, 131072], device=module.device)
+        noise = torch.randn([4, 1, 131072], device=module.device)
         with eval_mode(module):
             fakes = sample(module, noise, 500, 1)
 
-        #ms_decoder = MidSideDecoding()
+        #undo the PQMF filtering
+        fakes = self.pqmf.inverse(fakes)
 
         log_dict = {}
         for i, fake in enumerate(fakes):
@@ -79,6 +84,8 @@ def main():
                    help='number of GPUs to use for training')  
     p.add_argument('--mono', type=int, default=True,
                    help='whether or not the model runs in mono')  
+    p.add_argument('--pqmf-bands', type=int, default=128,
+                   help='number of sub-bands for the PQMF filter')  
     args = p.parse_args()
 
     # sample size needs to be a multiple of 2^16 for u-net compat
@@ -89,7 +96,7 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
-    model = LightningDiffusion()
+    model = LightningDiffusion(args)
     wandb_logger = pl.loggers.WandbLogger(project="break-diffusion")
     wandb_logger.watch(model.model)
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)

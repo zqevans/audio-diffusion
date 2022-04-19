@@ -4,6 +4,8 @@ from torchaudio import transforms as T
 import random
 from glob import glob
 
+from RAVE.rave.pqmf import PQMF
+
 from .utils import MidSideEncoding, Mono, Stereo, RandomGain, PadCrop
 
 class SampleDataset(torch.utils.data.Dataset):
@@ -17,7 +19,8 @@ class SampleDataset(torch.utils.data.Dataset):
         Mono(),
         #MidSideEncoding(),
         RandomGain(0.5, 1.0),
-        PadCrop(args.training_sample_size)
+        PadCrop(args.training_sample_size),
+        PQMF(100, 128)
     )
     for path in paths:
       self.filenames += glob(f'{path}/**/*.wav', recursive=True)
@@ -33,8 +36,6 @@ class SampleDataset(torch.utils.data.Dataset):
           resample_tf = T.Resample(sr, 44100)
           audio = resample_tf(audio)
       audio = audio.clamp(-1, 1)
-
-
 
       if self.transform is not None:
         audio = self.transform(audio)
