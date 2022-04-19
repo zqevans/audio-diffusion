@@ -44,7 +44,7 @@ class DemoCallback(pl.Callback):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_batch_end(self, trainer, module):
+    def on_train_batch_end(self, trainer, module):
         if trainer.global_step % 1000 != 0:
             return
 
@@ -54,8 +54,6 @@ class DemoCallback(pl.Callback):
 
         #undo the PQMF filtering
         fakes = self.pqmf.inverse(fakes)
-
-        #restore stereo channels
 
 
         log_dict = {}
