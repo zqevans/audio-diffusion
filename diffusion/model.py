@@ -38,7 +38,6 @@ class ResidualBlock(nn.Module):
     def forward(self, input):
         return self.main(input) + self.skip(input)
 
-
 class ResConvBlock(ResidualBlock):
     def __init__(self, c_in, c_mid, c_out, is_last=False):
         skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
@@ -48,7 +47,6 @@ class ResConvBlock(ResidualBlock):
             nn.Conv1d(c_mid, c_out, 5, padding=2),
             nn.ReLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
-
 
 class SelfAttention1d(nn.Module):
     def __init__(self, c_in, n_head=1):
@@ -69,7 +67,6 @@ class SelfAttention1d(nn.Module):
         y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
         return input + self.out_proj(y)
 
-
 class SkipBlock(nn.Module):
     def __init__(self, *main):
         super().__init__()
@@ -77,7 +74,6 @@ class SkipBlock(nn.Module):
 
     def forward(self, input):
         return torch.cat([self.main(input), input], dim=1)
-
 
 class FourierFeatures(nn.Module):
     def __init__(self, in_features, out_features, std=1.):
@@ -89,20 +85,21 @@ class FourierFeatures(nn.Module):
         f = 2 * math.pi * input @ self.weight.T
         return torch.cat([f.cos(), f.sin()], dim=-1)
 
-
 def expand_to_planes(input, shape):
     return input[..., None].repeat([1, 1, shape[2]])
 
 class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
-        c_mults = [512, 512, 1024, 1024] + [2048]*4 
+
+        c_mults = [1024] * 4 + [2048] * 4
+       
         depth = len(c_mults)
 
-        #Number of input/output audio channels for the model
-        n_io_channels = global_args.pqmf_bands if global_args.mono else 2 * global_args.pqmf_bands
+        print(f'Model downsampling by factor of {2 ** depth}')
 
-        c_mults = [2*x for x in c_mults] if not global_args.mono else c_mults
+        #Number of input/output audio channels for the model
+        n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
 
         self.timestep_embed = FourierFeatures(1, 16)
 

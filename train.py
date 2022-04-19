@@ -17,6 +17,7 @@ from diffusion.model import LightningDiffusion
 from diffusion.dataset import SampleDataset
 
 from RAVE.rave.pqmf import PQMF
+from diffusion.utils import MidSideDecoding
 
 # Define utility functions
 @contextmanager
@@ -40,6 +41,7 @@ class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
         self.pqmf = PQMF(100, global_args.pqmf_bands)
+        self.ms_decoder = MidSideDecoding()
 
     @rank_zero_only
     @torch.no_grad()
@@ -47,19 +49,22 @@ class DemoCallback(pl.Callback):
         if trainer.global_step % 1000 != 0:
             return
 
-        noise = torch.randn([4, 1, 131072], device=module.device)
+        noise = torch.randn([4, 2, 131072], device=module.device)
         with eval_mode(module):
             fakes = sample(module, noise, 500, 1)
 
         #undo the PQMF filtering
         fakes = self.pqmf.inverse(fakes)
 
+        #restore stereo channels
+        
+
         log_dict = {}
         for i, fake in enumerate(fakes):
             filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
             
-            #fake = ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            #fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
             torchaudio.save(filename, fake, 44100)
             log_dict[f'demo_{i}'] = wandb.Audio(filename,
                                                 sample_rate=44100,
@@ -68,6 +73,7 @@ class DemoCallback(pl.Callback):
 
 
 class ExceptionCallback(pl.Callback):
+    @rank_zero_only
     def on_exception(self, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
@@ -84,16 +90,21 @@ def main():
                    help='number of audio samples per batch')   
     p.add_argument('--num-gpus', type=int, default=1,
                    help='number of GPUs to use for training')  
-    p.add_argument('--mono', type=int, default=True,
-                   help='whether or not the model runs in mono')  
+    # p.add_argument('--mono', type=int, default=True,
+    #                help='whether or not the model runs in mono')  
     p.add_argument('--pqmf-bands', type=int, default=128,
                    help='number of sub-bands for the PQMF filter')  
     args = p.parse_args()
 
-    # sample size needs to be a multiple of 2^16 for u-net compat
-    args.training_sample_size = 131072 # (2 ^ 16) * 2, around 3 seconds at 44.1k
+    #Bottom level samples = ((training_sample_size / PQMF bands) / [2^model depth])
 
+    # sample size needs to be a multiple of 2^([2^u-net depth] + PQMF-bands) for u-net/PQMF compat
+    args.training_sample_size = 131072 # (2 ^ [2^8] + 128) * 2, around 3 seconds at 44.1k
     
+    bottom_sample_size = args.training_sample_size / args.pqmf_bands / (2**8)
+
+    print(f'bottom sample size: {bottom_sample_size}')
+
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)

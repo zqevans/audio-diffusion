@@ -20,6 +20,9 @@ class TestUtils(unittest.TestCase):
         encoder = MidSideEncoding()
         encoded_mono = encoder(signal)
 
+        #Mid content should be the same as the mono signal
+        self.assertTrue(torch.equal(mono_signal, encoded_mono[0]))
+
         #Side content should be all zeros
         zeros = torch.zeros_like(encoded_mono[1])
         self.assertTrue(torch.equal(zeros, encoded_mono[1]))

@@ -13,15 +13,14 @@ class SampleDataset(torch.utils.data.Dataset):
     super().__init__()
     self.filenames = []
 
-    self.channel_tf = torch.mean if global_args.mono else Stereo()
-
     self.transform = torch.nn.Sequential(
-        Mono(),
-        #MidSideEncoding(),
+        MidSideEncoding(),
         RandomGain(0.5, 1.0),
-        PadCrop(global_args.training_sample_size),
-        PQMF(100, 128)
+        PadCrop(global_args.training_sample_size)  
     )
+
+    self.pqmf = PQMF(100, 128)
+
     for path in paths:
       self.filenames += glob(f'{path}/**/*.wav', recursive=True)
 
@@ -39,6 +38,12 @@ class SampleDataset(torch.utils.data.Dataset):
 
       if self.transform is not None:
         audio = self.transform(audio)
+
+      #split and concat the channels
+      audio = torch.cat(torch.split(audio, 1, dim=1), dim=0)
+
+      #PQMF-encode the audio
+      audio = self.pqmf(audio)
 
       return audio
     except Exception as e:
