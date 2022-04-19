@@ -75,7 +75,9 @@ class ExceptionCallback(pl.Callback):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
-                   help='the training data directory')         
+                   help='the training data directory')      
+    p.add_argument('--name', type=str, required=True,
+                   help='the name of the run')                      
     p.add_argument('--num-workers', type=int, default=2,
                    help='number of CPU workers for the DataLoader')   
     p.add_argument('--batch-size', type=int, default=8,
@@ -97,10 +99,10 @@ def main():
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
     model = LightningDiffusion(args)
-    wandb_logger = pl.loggers.WandbLogger(project="break-diffusion")
+    wandb_logger = pl.loggers.WandbLogger(project=args.name)
     wandb_logger.watch(model.model)
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
-    demo_callback = DemoCallback()
+    demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
 
     extra_trainer_args = {}
