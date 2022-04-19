@@ -37,9 +37,9 @@ def eval_mode(model):
     return train_mode(model, False)
 
 class DemoCallback(pl.Callback):
-    def __init__(self, *args):
+    def __init__(self, global_args):
         super().__init__()
-        self.pqmf = PQMF(100, args.pqmf_bands)
+        self.pqmf = PQMF(100, global_args.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
@@ -92,7 +92,7 @@ def main():
     args.training_sample_size = 131072 # (2 ^ 16) * 2, around 3 seconds at 44.1k
 
     
-    train_set = SampleDataset([args.training_dir], *args)
+    train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 

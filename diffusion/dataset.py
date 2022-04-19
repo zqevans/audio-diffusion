@@ -9,17 +9,17 @@ from RAVE.rave.pqmf import PQMF
 from .utils import MidSideEncoding, Mono, Stereo, RandomGain, PadCrop
 
 class SampleDataset(torch.utils.data.Dataset):
-  def __init__(self, paths, *args):
+  def __init__(self, paths, global_args):
     super().__init__()
     self.filenames = []
 
-    self.channel_tf = torch.mean if args.mono else Stereo()
+    self.channel_tf = torch.mean if global_args.mono else Stereo()
 
     self.transform = torch.nn.Sequential(
         Mono(),
         #MidSideEncoding(),
         RandomGain(0.5, 1.0),
-        PadCrop(args.training_sample_size),
+        PadCrop(global_args.training_sample_size),
         PQMF(100, 128)
     )
     for path in paths:
