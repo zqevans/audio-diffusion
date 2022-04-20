@@ -158,9 +158,8 @@ class LightningDiffusion(pl.LightningModule):
         return optim.Adam(self.model.parameters(), lr=1e-4)
 
     def eval_batch(self, batch):
-        print(f'batch shape: {batch.shape}')
         reals = batch[0]
-        reals = self.pqmf(batch)
+        reals = self.pqmf(reals)
 
         print(f'Reals shape: {reals.shape}')
 
