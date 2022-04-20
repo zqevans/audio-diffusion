@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch import optim
 from torch.nn import functional as F
+import numpy as np
 
 from .utils import get_alphas_sigmas
 
@@ -91,24 +92,20 @@ class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
 
-        c_mults = [1024, 1024, 2048, 4096, 4096]
-        downsample_ratios = [2, 2, 3, 5, 5]
+        c_mults = [256, 256] + [512] * 8
        
         depth = len(c_mults)
-
-        print(f'Model downsampling by factor of {2 ** depth}')
 
         #Number of input/output audio channels for the model
         n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
 
         self.timestep_embed = FourierFeatures(1, 16)
 
-        attn_layer = 3
+        attn_layer = depth - 5
 
         block = nn.Identity()
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
-            downsample_ratio = downsample_ratios[i-1]
             if i > 1:
                 c_prev = c_mults[i - 2]
                 block = SkipBlock(
@@ -126,7 +123,7 @@ class AudioDiffusion(nn.Module):
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     ResConvBlock(c, c, c_prev),
                     SelfAttention1d(c_prev, c_prev // 32) if i >= attn_layer else nn.Identity(),
-                    nn.Upsample(scale_factor=downsample_ratio , mode='linear', align_corners=False),
+                    nn.Upsample(scale_factor=2 , mode='linear', align_corners=False),
                 )
             else:
                 block = nn.Sequential(
@@ -150,7 +147,7 @@ class LightningDiffusion(pl.LightningModule):
         self.model = AudioDiffusion(global_args)
         self.model_ema = deepcopy(self.model)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.pqmf = PQMF(2, 100, 128)
+        self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
 
     def forward(self, *args, **kwargs):
         if self.training:
@@ -164,7 +161,7 @@ class LightningDiffusion(pl.LightningModule):
         reals = self.pqmf(batch)
 
         # Sample timesteps
-        t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
+        t = self.rng.draw(reals.shape[1])[:, 0].to(reals)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)

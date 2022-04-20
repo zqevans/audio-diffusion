@@ -49,7 +49,6 @@ class DemoCallback(pl.Callback):
             return
 
         try:
-
             noise = torch.randn([4, 2, 131072], device=module.device)
             with eval_mode(module):
                 fakes = sample(module, noise, 500, 1)
@@ -91,7 +90,7 @@ def main():
                    help='number of GPUs to use for training')  
     # p.add_argument('--mono', type=int, default=True,
     #                help='whether or not the model runs in mono')  
-    p.add_argument('--pqmf-bands', type=int, default=128,
+    p.add_argument('--pqmf-bands', type=int, default=32,
                    help='number of sub-bands for the PQMF filter')  
     args = p.parse_args()
 
