@@ -158,14 +158,22 @@ class LightningDiffusion(pl.LightningModule):
         return optim.Adam(self.model.parameters(), lr=1e-4)
 
     def eval_batch(self, batch):
+        print(f'batch shape: {batch.shape}')
+        reals = batch[0]
         reals = self.pqmf(batch)
 
+        print(f'Reals shape: {reals.shape}')
+
         # Sample timesteps
-        t = self.rng.draw(reals.shape[1])[:, 0].to(reals)
+        t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
+
+        print(f't shape: {t.shape}')
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
 
+        print(f'Alphas shape: {alphas.shape}')
+        print(f'Sigmas shape: {sigmas.shape}')
         # Combine the ground truth images and the noise
         sigmas = sigmas[:, None, None]
         noise = torch.randn_like(reals)
