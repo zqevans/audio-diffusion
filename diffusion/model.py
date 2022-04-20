@@ -157,9 +157,7 @@ class LightningDiffusion(pl.LightningModule):
         return optim.Adam(self.model.parameters(), lr=1e-4)
 
     def eval_batch(self, batch):
-        reals = batch[0]
-
-        reals = self.pqmf(reals)
+        reals = self.pqmf(batch)
 
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
