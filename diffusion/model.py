@@ -91,7 +91,8 @@ class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
 
-        c_mults = [1024] * 6 + [2048] * 2
+        c_mults = [1024, 1024, 2048, 4096, 4096]
+        downsample_ratios = [2, 2, 3, 5, 5]
        
         depth = len(c_mults)
 
@@ -102,27 +103,30 @@ class AudioDiffusion(nn.Module):
 
         self.timestep_embed = FourierFeatures(1, 16)
 
+        attn_layer = 3
+
         block = nn.Identity()
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
+            downsample_ratio = downsample_ratios[i-1]
             if i > 1:
                 c_prev = c_mults[i - 2]
                 block = SkipBlock(
                     nn.AvgPool1d(2),
                     ResConvBlock(c_prev, c, c),
-                    SelfAttention1d(c, c // 32) if i >= 9 else nn.Identity(),
+                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     ResConvBlock(c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= 9 else nn.Identity(),
+                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     ResConvBlock(c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= 9 else nn.Identity(),
+                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     block,
                     ResConvBlock(c * 2 if i != depth else c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= 9 else nn.Identity(),
+                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     ResConvBlock(c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= 9 else nn.Identity(),
+                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     ResConvBlock(c, c, c_prev),
-                    SelfAttention1d(c_prev, c_prev // 32) if i >= 9 else nn.Identity(),
-                    nn.Upsample(scale_factor=2, mode='linear', align_corners=False),
+                    SelfAttention1d(c_prev, c_prev // 32) if i >= attn_layer else nn.Identity(),
+                    nn.Upsample(scale_factor=downsample_ratio , mode='linear', align_corners=False),
                 )
             else:
                 block = nn.Sequential(
