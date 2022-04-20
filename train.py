@@ -48,11 +48,11 @@ class DemoCallback(pl.Callback):
         if trainer.global_step % 1000 != 0:
             return
 
-        #Create stereo noise
-        noise = torch.randn([4, 2, 131072])
+        noise = torch.zeros([4, 2, 131072])
 
-        #PQMF-encode the noise
         noise = self.pqmf(noise)
+
+        noise = torch.randn_like(noise)
 
         noise = noise.to(module.device)
 

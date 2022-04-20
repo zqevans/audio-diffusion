@@ -92,7 +92,7 @@ class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
 
-        c_mults = [256, 256] + [512] * 8
+        c_mults = [512, 512] + [1024] * 7
        
         depth = len(c_mults)
 
@@ -101,7 +101,7 @@ class AudioDiffusion(nn.Module):
 
         self.timestep_embed = FourierFeatures(1, 16)
 
-        attn_layer = depth - 5
+        attn_layer = depth - 4
 
         block = nn.Identity()
         for i in range(depth, 0, -1):
@@ -159,6 +159,7 @@ class LightningDiffusion(pl.LightningModule):
 
     def eval_batch(self, batch):
         reals = batch[0]
+        
         reals = self.pqmf(reals)
 
         # Sample timesteps
