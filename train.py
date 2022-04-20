@@ -44,7 +44,7 @@ class DemoCallback(pl.Callback):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_end(self, trainer, module):
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
         if trainer.global_step % 1000 != 0:
             return
 
