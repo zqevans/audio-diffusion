@@ -4,7 +4,6 @@ from torchaudio import transforms as T
 import random
 from glob import glob
 
-from .pqmf import CachedPQMF as PQMF
 
 from .utils import MidSideEncoding, Stereo, RandomGain, PadCrop
 
@@ -23,8 +22,6 @@ class SampleDataset(torch.utils.data.Dataset):
         MidSideEncoding()
     )
 
-    self.pqmf = PQMF(2, 100, 128)
-
     for path in paths:
       self.filenames += glob(f'{path}/**/*.wav', recursive=True)
 
@@ -42,9 +39,6 @@ class SampleDataset(torch.utils.data.Dataset):
 
       if self.transform is not None:
         audio = self.transform(audio)
-
-      #PQMF-encode the audio
-      audio = self.pqmf(audio)
 
       return audio
     except Exception as e:

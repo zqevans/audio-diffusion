@@ -8,6 +8,8 @@ from torch.nn import functional as F
 
 from .utils import get_alphas_sigmas
 
+from .pqmf import CachedPQMF as PQMF
+
 @torch.no_grad()
 def ema_update(model, averaged_model, decay):
     """Incorporates updated model parameters into an exponential moving averaged
@@ -144,6 +146,7 @@ class LightningDiffusion(pl.LightningModule):
         self.model = AudioDiffusion(global_args)
         self.model_ema = deepcopy(self.model)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.pqmf = PQMF(2, 100, 128)
 
     def forward(self, *args, **kwargs):
         if self.training:
@@ -155,6 +158,8 @@ class LightningDiffusion(pl.LightningModule):
 
     def eval_batch(self, batch):
         reals = batch[0]
+
+        reals = self.pqmf(reals)
 
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
