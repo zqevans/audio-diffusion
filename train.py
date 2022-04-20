@@ -48,29 +48,31 @@ class DemoCallback(pl.Callback):
         if trainer.global_step % 1000 != 0:
             return
 
-        noise = torch.randn([4, 2, 131072], device=module.device)
-        with eval_mode(module):
-            fakes = sample(module, noise, 500, 1)
+        try:
 
-        #undo the PQMF filtering
-        fakes = self.pqmf.inverse(fakes)
+            noise = torch.randn([4, 2, 131072], device=module.device)
+            with eval_mode(module):
+                fakes = sample(module, noise, 500, 1)
 
+            #undo the PQMF filtering
+            fakes = self.pqmf.inverse(fakes)
 
-        log_dict = {}
-        for i, fake in enumerate(fakes):
-            filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
-            
-            fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            #fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            torchaudio.save(filename, fake, 44100)
-            log_dict[f'demo_{i}'] = wandb.Audio(filename,
-                                                sample_rate=44100,
-                                                caption=f'Demo {i}')
-        trainer.logger.experiment.log(log_dict, step=trainer.global_step)
+            log_dict = {}
+            for i, fake in enumerate(fakes):
+                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
+                
+                fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                #fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                torchaudio.save(filename, fake, 44100)
+                log_dict[f'demo_{i}'] = wandb.Audio(filename,
+                                                    sample_rate=44100,
+                                                    caption=f'Demo {i}')
+            trainer.logger.experiment.log(log_dict, step=trainer.global_step)
+        except Exception as e:
+            print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 
 class ExceptionCallback(pl.Callback):
-    @rank_zero_only
     def on_exception(self, trainer, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
@@ -115,17 +117,18 @@ def main():
 
     extra_trainer_args = {}
 
-    if (args.num_gpus > 1):
-        extra_trainer_args["accelerator"] = 'ddp'
+    # if (args.num_gpus > 1):
+    #     extra_trainer_args["accelerator"] = 'ddp'
 
     trainer = pl.Trainer(
         gpus=args.num_gpus,
+        accelerator='ddp',
         precision=16,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=10000000,
-        **extra_trainer_args
+       # **extra_trainer_args
     )
 
     trainer.fit(model, train_dl)
