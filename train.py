@@ -71,7 +71,7 @@ class DemoCallback(pl.Callback):
 
 class ExceptionCallback(pl.Callback):
     @rank_zero_only
-    def on_exception(self, module, err):
+    def on_exception(self, trainer, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
 
