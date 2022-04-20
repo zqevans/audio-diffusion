@@ -166,7 +166,6 @@ class LightningDiffusion(pl.LightningModule):
         alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
-        alphas = alphas[:, None, None]
         sigmas = sigmas[:, None, None]
         noise = torch.randn_like(reals)
         noised_reals = reals * alphas + noise * sigmas
