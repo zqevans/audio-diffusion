@@ -45,20 +45,22 @@ class DemoCallback(pl.Callback):
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        if trainer.global_step % 100 != 0:
+        if trainer.global_step % 1000 != 0:
             return
 
         #Create stereo noise
-        noise = torch.randn([4, 2, 131072], device=module.device)
+        noise = torch.randn([4, 2, 131072])
 
         #PQMF-encode the noise
         noise = self.pqmf(noise)
+
+        noise = noise.to(module.device)
 
         with eval_mode(module):
             fakes = sample(module, noise, 500, 1)
 
         #undo the PQMF encoding
-        fakes = self.pqmf.inverse(fakes)
+        fakes = self.pqmf.inverse(fakes.cpu())
 
         log_dict = {}
         for i, fake in enumerate(fakes):
