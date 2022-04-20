@@ -40,7 +40,7 @@ class SampleDataset(torch.utils.data.Dataset):
       if self.transform is not None:
         audio = self.transform(audio)
 
-      return audio
+      return (audio, audio_filename)
     except Exception as e:
      # print(f'Couldn\'t load file {audio_filename}: {e}')
       return self[random.randrange(len(self))]
