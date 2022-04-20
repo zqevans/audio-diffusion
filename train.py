@@ -45,30 +45,32 @@ class DemoCallback(pl.Callback):
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        if trainer.global_step % 1000 != 0:
+        if trainer.global_step % 100 != 0:
             return
 
-        try:
-            noise = torch.randn([4, 2, 131072], device=module.device)
-            with eval_mode(module):
-                fakes = sample(module, noise, 500, 1)
+        #Create stereo noise
+        noise = torch.randn([4, 2, 131072], device=module.device)
 
-            #undo the PQMF filtering
-            fakes = self.pqmf.inverse(fakes)
+        #PQMF-encode the noise
+        noise = self.pqmf(noise)
 
-            log_dict = {}
-            for i, fake in enumerate(fakes):
-                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
-                
-                fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                #fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                torchaudio.save(filename, fake, 44100)
-                log_dict[f'demo_{i}'] = wandb.Audio(filename,
-                                                    sample_rate=44100,
-                                                    caption=f'Demo {i}')
-            trainer.logger.experiment.log(log_dict, step=trainer.global_step)
-        except Exception as e:
-            print(f'{type(e).__name__}: {e}', file=sys.stderr)
+        with eval_mode(module):
+            fakes = sample(module, noise, 500, 1)
+
+        #undo the PQMF encoding
+        fakes = self.pqmf.inverse(fakes)
+
+        log_dict = {}
+        for i, fake in enumerate(fakes):
+            filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
+            
+            fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            #fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            torchaudio.save(filename, fake, 44100)
+            log_dict[f'demo_{i}'] = wandb.Audio(filename,
+                                                sample_rate=44100,
+                                                caption=f'Demo {i}')
+        trainer.logger.experiment.log(log_dict, step=trainer.global_step)
 
 
 class ExceptionCallback(pl.Callback):
