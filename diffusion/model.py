@@ -101,7 +101,7 @@ class AudioDiffusion(nn.Module):
 
         self.timestep_embed = FourierFeatures(1, 16)
 
-        attn_layer = depth - 4
+        attn_layer = depth - 5
 
         block = nn.Identity()
         for i in range(depth, 0, -1):
