@@ -100,10 +100,9 @@ def main():
 
     #Bottom level samples = ((training_sample_size / PQMF bands) / [2^model depth])
 
-    # sample size needs to be a multiple of 2^([2^u-net depth] + PQMF-bands) for u-net/PQMF compat
-    args.training_sample_size = 131072 # (2 ^ [2^8] + 128) * 2, around 3 seconds at 44.1k
+    args.training_sample_size = 131072 
     
-    bottom_sample_size = args.training_sample_size / args.pqmf_bands / (2**8)
+    bottom_sample_size = args.training_sample_size / args.pqmf_bands / (2**14)
 
     print(f'bottom sample size: {bottom_sample_size}')
 
