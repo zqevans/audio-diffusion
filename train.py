@@ -40,7 +40,7 @@ class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
         self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
-        self.ms_decoder = MidSideDecoding()
+        #self.ms_decoder = MidSideDecoding()
 
     @rank_zero_only
     @torch.no_grad()
@@ -66,8 +66,8 @@ class DemoCallback(pl.Callback):
         for i, fake in enumerate(fakes):
             filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
             
-            fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            #fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            #fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
             torchaudio.save(filename, fake, 44100)
             log_dict[f'demo_{i}'] = wandb.Audio(filename,
                                                 sample_rate=44100,
@@ -94,7 +94,7 @@ def main():
                    help='number of GPUs to use for training')  
     # p.add_argument('--mono', type=int, default=True,
     #                help='whether or not the model runs in mono')  
-    p.add_argument('--pqmf-bands', type=int, default=32,
+    p.add_argument('--pqmf-bands', type=int, default=4,
                    help='number of sub-bands for the PQMF filter')  
     args = p.parse_args()
 

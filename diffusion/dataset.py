@@ -18,7 +18,7 @@ class SampleDataset(torch.utils.data.Dataset):
 
         #encoding
         Stereo(),
-        MidSideEncoding()
+        #MidSideEncoding()
     )
 
     for path in paths:
