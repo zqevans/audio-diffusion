@@ -24,11 +24,14 @@ class SampleDataset(torch.utils.data.Dataset):
     for path in paths:
       self.filenames += glob(f'{path}/**/*.wav', recursive=True)
 
+    self.num_files = len(self.filenames)
+    self.data_repeats = global_args.data_repeats
+
   def __len__(self):
-    return len(self.filenames)
+    return self.num_files * self.data_repeats
 
   def __getitem__(self, idx):
-    audio_filename = self.filenames[idx]
+    audio_filename = self.filenames[idx % self.num_files]
     try:
       audio, sr = torchaudio.load(audio_filename, normalize=True)
       if sr != 44100:

@@ -102,6 +102,8 @@ def main():
                    help='Number of samples to train on, must be a multiple of 65536')  
     p.add_argument('--demo-every', type=int, default=1000,
                    help='Number of steps between demos')  
+    p.add_argument('--data-repeats', type=int, default=1,
+                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')                
     args = p.parse_args()
 
     #Bottom level samples = ((sample_size / PQMF bands) / [2^model depth])
