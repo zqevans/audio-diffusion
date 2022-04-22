@@ -8,7 +8,7 @@ class TestPqmf(unittest.TestCase):
 
     def test_pqmf_shapes_equal(self):
         signal = torch.randn([1, 1, 131072])
-        pqmf = PQMF(1, 100, 32)
+        pqmf = PQMF(1, 70, 32)
         encoded = pqmf(signal)
         decoded = pqmf.inverse(encoded)
         
@@ -17,7 +17,7 @@ class TestPqmf(unittest.TestCase):
 
     def test_pqmf_stereo_shapes(self):
         signal = torch.randn([1, 2, 131072])
-        pqmf = PQMF(2, 100, 32)
+        pqmf = PQMF(2, 70, 32)
         encoded = pqmf(signal)
         print(encoded.shape)
         decoded = pqmf.inverse(encoded)

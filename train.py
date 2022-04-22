@@ -39,7 +39,7 @@ def eval_mode(model):
 class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
-        self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
+        self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
         #self.ms_decoder = MidSideDecoding()

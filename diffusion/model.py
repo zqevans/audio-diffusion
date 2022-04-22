@@ -147,7 +147,7 @@ class LightningDiffusion(pl.LightningModule):
         self.model = AudioDiffusion(global_args)
         self.model_ema = deepcopy(self.model)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
+        self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     def forward(self, *args, **kwargs):
         if self.training:
