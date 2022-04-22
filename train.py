@@ -96,13 +96,14 @@ def main():
     #                help='whether or not the model runs in mono')  
     p.add_argument('--pqmf-bands', type=int, default=4,
                    help='number of sub-bands for the PQMF filter')  
+    p.add_argument('--sample-size', type=int, default=131072,
+                   help='Number of samples to train on, must be a multiple of 65536')  
     args = p.parse_args()
 
-    #Bottom level samples = ((training_sample_size / PQMF bands) / [2^model depth])
+    #Bottom level samples = ((sample_size / PQMF bands) / [2^model depth])
 
-    args.training_sample_size = 131072 
     
-    bottom_sample_size = args.training_sample_size / args.pqmf_bands / (2**14)
+    bottom_sample_size = args.sample_size / args.pqmf_bands / (2**14)
 
     print(f'bottom sample size: {bottom_sample_size}')
 

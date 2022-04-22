@@ -14,7 +14,7 @@ class SampleDataset(torch.utils.data.Dataset):
     self.transform = torch.nn.Sequential(
         #augmentations and normalization
         RandomGain(0.5, 1.0),
-        PadCrop(global_args.training_sample_size),
+        PadCrop(global_args.sample_size),
 
         #encoding
         Stereo(),
