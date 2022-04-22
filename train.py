@@ -41,12 +41,13 @@ class DemoCallback(pl.Callback):
         super().__init__()
         self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
         self.demo_samples = global_args.sample_size
+        self.demo_every = global_args.demo_every
         #self.ms_decoder = MidSideDecoding()
 
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        if trainer.global_step % 1000 != 0:
+        if (trainer.global_step - 1) % self.demo_every != 0:
             return
 
         noise = torch.zeros([4, 2, self.demo_samples])
@@ -99,6 +100,8 @@ def main():
                    help='number of sub-bands for the PQMF filter')  
     p.add_argument('--sample-size', type=int, default=131072,
                    help='Number of samples to train on, must be a multiple of 65536')  
+    p.add_argument('--demo-every', type=int, default=1000,
+                   help='Number of steps between demos')  
     args = p.parse_args()
 
     #Bottom level samples = ((sample_size / PQMF bands) / [2^model depth])
