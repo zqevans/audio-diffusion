@@ -108,7 +108,6 @@ def main():
 
     #Bottom level samples = ((sample_size / PQMF bands) / [2^model depth])
 
-    
     bottom_sample_size = args.sample_size / args.pqmf_bands / (2**14)
 
     print(f'bottom sample size: {bottom_sample_size}')
@@ -133,6 +132,7 @@ def main():
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
+        auto_scale_batch_size=True,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
