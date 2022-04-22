@@ -40,6 +40,7 @@ class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
         self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
+        self.demo_samples = global_args.sample_size
         #self.ms_decoder = MidSideDecoding()
 
     @rank_zero_only
@@ -48,7 +49,7 @@ class DemoCallback(pl.Callback):
         if trainer.global_step % 1000 != 0:
             return
 
-        noise = torch.zeros([4, 2, 131072])
+        noise = torch.zeros([4, 2, self.demo_samples])
 
         noise = self.pqmf(noise)
 
@@ -57,7 +58,7 @@ class DemoCallback(pl.Callback):
         noise = noise.to(module.device)
 
         with eval_mode(module):
-            fakes = sample(module, noise, 500, 1)
+            fakes = sample(module, noise, 1000, 1)
 
         #undo the PQMF encoding
         fakes = self.pqmf.inverse(fakes.cpu())
