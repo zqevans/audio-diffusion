@@ -103,16 +103,38 @@ class FourierFeatures(nn.Module):
 def expand_to_planes(input, shape):
     return input[..., None].repeat([1, 1, shape[2]])
 
-#Encoder for global semantic information
-class GlobalSemanticEncoder(nn.Module):
-    def __init__(self, global_args):
-        super().__init__()
+class ResConvBlock(ResidualBlock):
+    def __init__(self, c_in, c_mid, c_out, is_last=False):
+        skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
+        super().__init__([
+            nn.Conv1d(c_in, c_mid, 5, padding=2),
+            nn.GroupNorm(1, c_mid),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(c_mid, c_out, 5, padding=2),
+            nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
+            nn.ReLU(inplace=True) if not is_last else nn.Identity(),
+        ], skip)
 
-    def forward(self, input):
-        pass
+class GlobalEncoder(nn.Sequential):
+    def __init__(self):
+        c_in = 2
+        c_mults = [64, 64, 128, 128] + [256] * 8
+        layers = []
+        c_mult_prev = c_in
+        for i, c_mult in enumerate(c_mults):
+            is_last = i == len(c_mults) - 1
+            layers.append(ResConvBlock(c_mult_prev, c_mult, c_mult))
+            layers.append(ResConvBlock(c_mult, c_mult, c_mult, is_last=is_last))
+            if not is_last:
+                layers.append(nn.AvgPool1d(2))
+            else:
+                layers.append(nn.AdaptiveAvgPool1d(1))
+                layers.append(nn.Flatten())
+            c_mult_prev = c_mult
+        super().__init__(*layers)
 
 #Encoder for local semantic information
-class LocalSemanticEncoder(nn.Module):
+class LocalEncoder(nn.Module):
     def __init__(self, global_args):
         super().__init__()
 
@@ -130,7 +152,8 @@ class AudioDiffusion(nn.Module):
         #Number of input/output audio channels for the model
         n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
 
-        self.mapping_timestep_embed = FourierFeatures(1, 128)
+        self.encoder = GlobalEncoder()
+
         self.timestep_embed = FourierFeatures(1, 16)
 
         self.state = {}
@@ -174,10 +197,8 @@ class AudioDiffusion(nn.Module):
                 )
         self.net = block
 
-    def forward(self, input, t, cond_embed):
-        cond_embed = F.normalize(cond_embed, dim=-1) * cond_embed.shape[-1]**0.5
-        mapping_timestep_embed = self.mapping_timestep_embed(t[:, None])
-        self.state['cond'] = self.mapping(torch.cat([cond_embed, mapping_timestep_embed], dim=1))
+    def forward(self, input, t):
+        self.state['cond'] = self.encoder(input)
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
         out = self.net(torch.cat([input, timestep_embed], dim=1))
         self.state.clear()
