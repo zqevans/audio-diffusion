@@ -16,7 +16,7 @@ from diffusion.inference import sample
 from diffusion.model import LightningDiffusion
 from diffusion.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from diffusion.utils import MidSideDecoding
+from diffusion.utils import MidSideDecoding, MidSideEncoding
 
 # Define utility functions
 @contextmanager
@@ -42,7 +42,7 @@ class DemoCallback(pl.Callback):
         self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
-        #self.ms_decoder = MidSideDecoding()
+        self.ms_encoder = MidSideEncoding()
 
     @rank_zero_only
     @torch.no_grad()
@@ -68,8 +68,8 @@ class DemoCallback(pl.Callback):
         for i, fake in enumerate(fakes):
             filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
             
-            #fake = self.ms_decoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+        
             torchaudio.save(filename, fake, 44100)
             log_dict[f'demo_{i}'] = wandb.Audio(filename,
                                                 sample_rate=44100,

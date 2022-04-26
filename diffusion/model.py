@@ -1,11 +1,12 @@
 from copy import deepcopy
 import math
+from perceiver_pytorch import Perceiver
 import pytorch_lightning as pl
 import torch
 from torch import nn
 from torch import optim
 from torch.nn import functional as F
-import numpy as np
+from functools import partial
 
 from .utils import get_alphas_sigmas
 
@@ -38,13 +39,27 @@ class ResidualBlock(nn.Module):
     def forward(self, input):
         return self.main(input) + self.skip(input)
 
-class ResConvBlock(ResidualBlock):
-    def __init__(self, c_in, c_mid, c_out, is_last=False):
+class Modulation1d(nn.Module):
+    def __init__(self, state, feats_in, c_out):
+        super().__init__()
+        self.state = state
+        self.layer = nn.Linear(feats_in, c_out * 2, bias=False)
+
+    def forward(self, input):
+        scales, shifts = self.layer(self.state['cond']).chunk(2, dim=-1)
+        return torch.addcmul(shifts[..., None], input, scales[..., None] + 1)
+
+class ResModConvBlock(ResidualBlock):
+    def __init__(self, state, feats_in, c_in, c_mid, c_out, is_last=False):
         skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
         super().__init__([
             nn.Conv1d(c_in, c_mid, 5, padding=2),
+            nn.GroupNorm(1, c_mid, affine=False),
+            Modulation1d(state, feats_in, c_mid),
             nn.ReLU(inplace=True),
             nn.Conv1d(c_mid, c_out, 5, padding=2),
+            nn.GroupNorm(1, c_mid, affine=False) if not is_last else nn.Identity(),
+            Modulation1d(state, feats_in, c_mid) if not is_last else nn.Identity(),
             nn.ReLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
 
@@ -88,6 +103,22 @@ class FourierFeatures(nn.Module):
 def expand_to_planes(input, shape):
     return input[..., None].repeat([1, 1, shape[2]])
 
+#Encoder for global semantic information
+class GlobalSemanticEncoder(nn.Module):
+    def __init__(self, global_args):
+        super().__init__()
+
+    def forward(self, input):
+        pass
+
+#Encoder for local semantic information
+class LocalSemanticEncoder(nn.Module):
+    def __init__(self, global_args):
+        super().__init__()
+
+    def forward(self, input):
+        pass
+
 class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
@@ -99,47 +130,58 @@ class AudioDiffusion(nn.Module):
         #Number of input/output audio channels for the model
         n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
 
+        self.mapping_timestep_embed = FourierFeatures(1, 128)
         self.timestep_embed = FourierFeatures(1, 16)
+
+        self.state = {}
 
         attn_layer = depth - 5
 
         block = nn.Identity()
+
+        conv_block = partial(ResModConvBlock, self.state, 1024)
+
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
             if i > 1:
                 c_prev = c_mults[i - 2]
                 block = SkipBlock(
                     nn.AvgPool1d(2),
-                    ResConvBlock(c_prev, c, c),
+                    conv_block(c_prev, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
-                    ResConvBlock(c, c, c),
+                    conv_block(c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
-                    ResConvBlock(c, c, c),
+                    conv_block(c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     block,
-                    ResConvBlock(c * 2 if i != depth else c, c, c),
+                    conv_block(c * 2 if i != depth else c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
-                    ResConvBlock(c, c, c),
+                    conv_block(c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
-                    ResConvBlock(c, c, c_prev),
+                    conv_block(c, c, c_prev),
                     SelfAttention1d(c_prev, c_prev // 32) if i >= attn_layer else nn.Identity(),
                     nn.Upsample(scale_factor=2 , mode='linear', align_corners=False),
                 )
             else:
                 block = nn.Sequential(
-                    ResConvBlock(n_io_channels + 16, c, c),
-                    ResConvBlock(c, c, c),
-                    ResConvBlock(c, c, c),
+                    conv_block(n_io_channels + 16, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
                     block,
-                    ResConvBlock(c * 2, c, c),
-                    ResConvBlock(c, c, c),
-                    ResConvBlock(c, c, n_io_channels, is_last=True),
+                    conv_block(c * 2, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, n_io_channels, is_last=True),
                 )
         self.net = block
 
-    def forward(self, input, t):
+    def forward(self, input, t, cond_embed):
+        cond_embed = F.normalize(cond_embed, dim=-1) * cond_embed.shape[-1]**0.5
+        mapping_timestep_embed = self.mapping_timestep_embed(t[:, None])
+        self.state['cond'] = self.mapping(torch.cat([cond_embed, mapping_timestep_embed], dim=1))
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        return self.net(torch.cat([input, timestep_embed], dim=1))
+        out = self.net(torch.cat([input, timestep_embed], dim=1))
+        self.state.clear()
+        return out
 
 class LightningDiffusion(pl.LightningModule):
     def __init__(self, global_args):
@@ -158,8 +200,11 @@ class LightningDiffusion(pl.LightningModule):
         return optim.Adam(self.model.parameters(), lr=1e-4)
 
     def eval_batch(self, batch):
+        # Get the audio files
         reals = batch[0]
         
+        #
+
         reals = self.pqmf(reals)
 
         # Sample timesteps

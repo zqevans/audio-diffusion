@@ -61,17 +61,3 @@ class MidSideEncoding(nn.Module):
         signal[1] = side
 
         return signal
-
-class MidSideDecoding(nn.Module):
-    def __call__(self, signal):
-        #signal_shape should be 2, s
-        mid = signal[0]
-        side = signal[1]
-        sum = (mid + side)/2
-        diff = (mid - side) / 2
-        left = sum + diff
-        right = sum - diff
-        signal[0] = left
-        signal[1] = right
-
-        return signal
