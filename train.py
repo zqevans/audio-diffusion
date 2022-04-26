@@ -52,7 +52,7 @@ class DemoCallback(pl.Callback):
 
         noise = torch.zeros([4, 2, self.demo_samples])
 
-        noise = self.pqmf(noise)
+        #noise = self.pqmf(noise)
 
         noise = torch.randn_like(noise)
 
@@ -62,7 +62,7 @@ class DemoCallback(pl.Callback):
             fakes = sample(module, noise, 1000, 1)
 
         #undo the PQMF encoding
-        fakes = self.pqmf.inverse(fakes.cpu())
+        #fakes = self.pqmf.inverse(fakes.cpu())
 
         log_dict = {}
         for i, fake in enumerate(fakes):

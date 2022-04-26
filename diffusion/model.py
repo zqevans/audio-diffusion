@@ -223,10 +223,8 @@ class LightningDiffusion(pl.LightningModule):
     def eval_batch(self, batch):
         # Get the audio files
         reals = batch[0]
-        
-        #
-
-        reals = self.pqmf(reals)
+    
+        #reals = self.pqmf(reals)
 
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)

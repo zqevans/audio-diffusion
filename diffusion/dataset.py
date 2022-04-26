@@ -11,10 +11,10 @@ class SampleDataset(torch.utils.data.Dataset):
     super().__init__()
     self.filenames = []
 
-    self.augs = None
-    # torch.nn.Sequential(
-    #   RandomGain(0.5, 1.0),
-    # )
+    self.augs = torch.nn.Sequential(
+      RandomGain(0.5, 1.0),
+      PadCrop(global_args.sample_size),
+    )
 
     self.encoding = torch.nn.Sequential(
         Stereo(),
@@ -42,11 +42,11 @@ class SampleDataset(torch.utils.data.Dataset):
           
       audio = audio.clamp(-1, 1)
 
-      #Run song-level augmentations
+      #Run file-level augmentations
       if self.augs is not None:
         audio = self.augs(audio)
 
-      #Encode the entire file
+      #Encode the file to assist in prediction
       if self.encoding is not None:
         audio = self.encoding(audio)
 
