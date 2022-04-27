@@ -10,7 +10,7 @@ from functools import partial
 
 from .utils import get_alphas_sigmas
 
-from .pqmf import CachedPQMF as PQMF
+#from .pqmf import CachedPQMF as PQMF
 
 @torch.no_grad()
 def ema_update(model, averaged_model, decay):
@@ -211,7 +211,7 @@ class LightningDiffusion(pl.LightningModule):
         self.diffusion = AudioDiffusion(global_args)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        #self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     def encode(self, *args, **kwargs):
         if self.training:
