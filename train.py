@@ -62,7 +62,9 @@ class DemoCallback(pl.Callback):
 
         #TODO: Load demo files, padcrop them, pass them in to the sampler
 
-        demo_files = glob(f'demo/**/*.wav')
+        demo_files = glob(f'./demo/*.wav')
+
+        print(demo_files)
 
         audio_batch = torch.zeros(len(demo_files), 2, self.demo_samples)
 
