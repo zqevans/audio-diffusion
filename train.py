@@ -3,6 +3,7 @@ import argparse
 from contextlib import contextmanager
 from pathlib import Path
 import sys
+from glob import glob
 
 # from einops import rearrange
 import pytorch_lightning as pl
@@ -16,7 +17,7 @@ from diffusion.inference import sample
 from diffusion.model import LightningDiffusion
 from diffusion.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from diffusion.utils import MidSideEncoding
+from diffusion.utils import MidSideEncoding, PadCrop
 
 # Define utility functions
 @contextmanager
@@ -43,6 +44,7 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
         self.ms_encoder = MidSideEncoding()
+        self.pad_crop = PadCrop(global_args.sample_size)
 
     @rank_zero_only
     @torch.no_grad()
@@ -50,16 +52,31 @@ class DemoCallback(pl.Callback):
         if (trainer.global_step - 1) % self.demo_every != 0:
             return
 
-        noise = torch.zeros([4, 2, self.demo_samples])
+        # noise = torch.zeros([4, 2, self.demo_samples])
 
-        #noise = self.pqmf(noise)
+        # #noise = self.pqmf(noise)
 
-        noise = torch.randn_like(noise)
+        # noise = torch.randn_like(noise)
 
-        noise = noise.to(module.device)
+        # noise = noise.to(module.device)
+
+        #TODO: Load demo files, padcrop them, pass them in to the sampler
+
+        demo_files = glob(f'demo/**/*.wav')
+
+        audio_batch = torch.zeros(len(demo_files), 2, self.demo_samples)
+
+        for i, demo_file in enumerate(demo_files):
+            audio, sr = torchaudio.load(demo_file)
+            audio = audio.clamp(-1, 1)
+            audio = self.pad_crop(audio)
+            audio = self.ms_encoder(audio)
+            audio_batch[i] = audio
+
+        audio_batch = audio_batch.to(module.device)
 
         with eval_mode(module):
-            fakes = sample(module, noise, 500, 1)
+            fakes = sample(module, audio_batch, 500, 1)
 
         #undo the PQMF encoding
         #fakes = self.pqmf.inverse(fakes.cpu())
@@ -108,7 +125,7 @@ def main():
                    help='Size of the style latents')                
     args = p.parse_args()
 
-    bottom_sample_size = args.sample_size / args.pqmf_bands / (2**14)
+    bottom_sample_size = args.sample_size / args.pqmf_bands / (2**12)
 
     print(f'bottom sample size: {bottom_sample_size}')
 
@@ -135,7 +152,6 @@ def main():
     )
 
     trainer.fit(model, train_dl)
-
 
 if __name__ == '__main__':
     main()
