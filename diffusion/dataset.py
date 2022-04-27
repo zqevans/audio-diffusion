@@ -17,8 +17,8 @@ class SampleDataset(torch.utils.data.Dataset):
     )
 
     self.encoding = torch.nn.Sequential(
-        Stereo(),
-        MidSideEncoding()
+      Stereo(),
+      MidSideEncoding()
     )
 
     for path in paths:

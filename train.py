@@ -103,7 +103,9 @@ def main():
     p.add_argument('--demo-every', type=int, default=1000,
                    help='Number of steps between demos')  
     p.add_argument('--data-repeats', type=int, default=1,
-                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')                
+                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')        
+    p.add_argument('--style-latent-size', type=int, default=512,
+                   help='Size of the style latents')                
     args = p.parse_args()
 
     #Bottom level samples = ((sample_size / PQMF bands) / [2^model depth])
@@ -118,16 +120,11 @@ def main():
 
     model = LightningDiffusion(args)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    wandb_logger.watch(model.model)
+    wandb_logger.watch(model.diffusion)
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
-
-    extra_trainer_args = {}
-
-    # if (args.num_gpus > 1):
-    #     extra_trainer_args["accelerator"] = 'ddp'
-
+    
     trainer = pl.Trainer(
         gpus=args.num_gpus,
         strategy='ddp',
@@ -137,7 +134,6 @@ def main():
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=10000000,
-       # **extra_trainer_args
     )
 
     trainer.fit(model, train_dl)

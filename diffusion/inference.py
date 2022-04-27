@@ -3,20 +3,25 @@ import torch
 from .utils import get_alphas_sigmas
 
 @torch.no_grad()
-def sample(model, x, steps, eta):
+def sample(model, signal, steps, eta):
     """Draws samples from a model given starting noise."""
-    ts = x.new_ones([x.shape[0]])
+    ts = signal.new_ones([signal.shape[0]])
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
     alphas, sigmas = get_alphas_sigmas(t)
+
+    z_sem = model.encode(signal)
+
+    #Create the noise to sample from (adds a stochastic variation)
+    x = torch.randn_like(signal)
 
     # The sampling loop
     for i in trange(steps):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i]).float()
+            v = model.decode(x, ts * t[i], z_sem).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]

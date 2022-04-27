@@ -116,9 +116,9 @@ class ResConvBlock(ResidualBlock):
         ], skip)
 
 class GlobalEncoder(nn.Sequential):
-    def __init__(self):
+    def __init__(self, latent_size):
         c_in = 2
-        c_mults = [64, 64, 128, 128] + [256] * 8
+        c_mults = [64, 64, 128, 128] + [latent_size] * 8
         layers = []
         c_mult_prev = c_in
         for i, c_mult in enumerate(c_mults):
@@ -160,7 +160,7 @@ class AudioDiffusion(nn.Module):
 
         block = nn.Identity()
 
-        conv_block = partial(ResModConvBlock, self.state, 1024)
+        conv_block = partial(ResModConvBlock, self.state, 256)
 
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
@@ -207,25 +207,31 @@ class LightningDiffusion(pl.LightningModule):
         super().__init__()
         
         self.encoder = GlobalEncoder()
-        self.model = AudioDiffusion(global_args)
-        self.model_ema = deepcopy(self.model)
+        self.encoder_ema = deepcopy(self.encoder)
+        self.diffusion = AudioDiffusion(global_args)
+        self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-    def forward(self, *args, **kwargs):
+    def encode(self, *args, **kwargs):
         if self.training:
-            return self.model(*args, **kwargs)
-        return self.model_ema(*args, **kwargs)
+            return self.encoder(*args, **kwargs)
+        return self.encoder_ema(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        if self.training:
+            return self.diffusion(*args, **kwargs)
+        return self.diffusion_ema(*args, **kwargs)
 
     def configure_optimizers(self):
-        return optim.Adam(self.model.parameters(), lr=1e-4)
+        return optim.Adam(self.diffusion.parameters(), lr=1e-4)
 
     def eval_batch(self, batch):
         # Get the audio files
         reals = batch[0]
     
         #reals = self.pqmf(reals)
-        style_latents = self.encoder(reals)
+        style_latents = self.encode(reals)
 
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
@@ -240,7 +246,7 @@ class LightningDiffusion(pl.LightningModule):
         targets = noise * alphas - reals * sigmas
 
         # Compute the model output and the loss.
-        v = self(noised_reals, t, style_latents)
+        v = self.decode(noised_reals, t, style_latents)
         return F.mse_loss(v, targets)
 
     def training_step(self, batch, batch_idx):
@@ -251,4 +257,5 @@ class LightningDiffusion(pl.LightningModule):
 
     def on_before_zero_grad(self, *args, **kwargs):
         decay = 0.98 if self.trainer.global_step < 10000 else 0.999
-        ema_update(self.model, self.model_ema, decay)
+        ema_update(self.diffusion, self.diffusion_ema, decay)
+        ema_update(self.encoder, self.encoder_ema, decay)
