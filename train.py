@@ -16,7 +16,7 @@ from diffusion.inference import sample
 from diffusion.model import LightningDiffusion
 from diffusion.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from diffusion.utils import MidSideDecoding, MidSideEncoding
+from diffusion.utils import MidSideEncoding
 
 # Define utility functions
 @contextmanager
@@ -108,8 +108,6 @@ def main():
                    help='Size of the style latents')                
     args = p.parse_args()
 
-    #Bottom level samples = ((sample_size / PQMF bands) / [2^model depth])
-
     bottom_sample_size = args.sample_size / args.pqmf_bands / (2**14)
 
     print(f'bottom sample size: {bottom_sample_size}')
@@ -124,7 +122,7 @@ def main():
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
-    
+
     trainer = pl.Trainer(
         gpus=args.num_gpus,
         strategy='ddp',

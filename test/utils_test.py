@@ -1,4 +1,4 @@
-from diffusion.utils import MidSideEncoding, MidSideDecoding, Stereo
+from diffusion.utils import MidSideEncoding, Stereo
 import torch
 
 import unittest
@@ -8,10 +8,9 @@ class TestUtils(unittest.TestCase):
     def test_mid_side_encoding_invertible(self):
         signal = torch.randn([2, 131072], device='cuda')
         encoder = MidSideEncoding()
-        decoder = MidSideDecoding()
 
         #Encoding and decoding should be a no-op
-        self.assertTrue(torch.equal(signal, decoder(encoder(signal))))
+        self.assertTrue(torch.equal(signal, encoder(encoder(signal))))
 
     def test_mid_side_encoding_mono(self):
         mono_signal = torch.randn([1, 131072], device='cuda')
