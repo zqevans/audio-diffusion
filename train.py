@@ -59,7 +59,7 @@ class DemoCallback(pl.Callback):
         noise = noise.to(module.device)
 
         with eval_mode(module):
-            fakes = sample(module, noise, 1000, 1)
+            fakes = sample(module, noise, 500, 1)
 
         #undo the PQMF encoding
         #fakes = self.pqmf.inverse(fakes.cpu())
@@ -98,7 +98,7 @@ def main():
     #                help='whether or not the model runs in mono')  
     p.add_argument('--pqmf-bands', type=int, default=4,
                    help='number of sub-bands for the PQMF filter')  
-    p.add_argument('--sample-size', type=int, default=131072,
+    p.add_argument('--sample-size', type=int, default=65536,
                    help='Number of samples to train on, must be a multiple of 65536')  
     p.add_argument('--demo-every', type=int, default=1000,
                    help='Number of steps between demos')  
