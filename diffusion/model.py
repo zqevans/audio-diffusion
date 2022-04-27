@@ -160,7 +160,7 @@ class AudioDiffusion(nn.Module):
 
         block = nn.Identity()
 
-        conv_block = partial(ResModConvBlock, self.state, 256)
+        conv_block = partial(ResModConvBlock, self.state, global_args.style_latent_size)
 
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
