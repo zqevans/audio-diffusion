@@ -20,6 +20,8 @@ from diffusion.dataset import SampleDataset
 from diffusion.utils import MidSideEncoding, PadCrop
 
 # Define utility functions
+
+
 @contextmanager
 def train_mode(model, mode=True):
     """A context manager that places a model into training mode and restores
@@ -37,10 +39,12 @@ def eval_mode(model):
     the previous mode on exit."""
     return train_mode(model, False)
 
+
 class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
         #self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        self.demo_dir = global_args.demo_dir
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
         self.ms_encoder = MidSideEncoding()
@@ -60,9 +64,9 @@ class DemoCallback(pl.Callback):
 
         # noise = noise.to(module.device)
 
-        #TODO: Load demo files, padcrop them, pass them in to the sampler
+        # TODO: Load demo files, padcrop them, pass them in to the sampler
 
-        demo_files = glob(f'./demo/*.wav')
+        demo_files = glob(f'{self.demo_dir}/**/*.wav', recursive=True)
 
         print(demo_files)
 
@@ -80,16 +84,17 @@ class DemoCallback(pl.Callback):
         with eval_mode(module):
             fakes = sample(module, audio_batch, 500, 1)
 
-        #undo the PQMF encoding
+        # undo the PQMF encoding
         #fakes = self.pqmf.inverse(fakes.cpu())
         try:
             print("Making log dict")
             log_dict = {}
             for i, fake in enumerate(fakes):
-                
+
                 filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
                 print(f"Decoding fake {i}")
-                fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                fake = self.ms_encoder(
+                    fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
                 print(f"Saving fake {i}")
                 torchaudio.save(filename, fake, 44100)
                 print(f"Adding log_dict item for fake {i}")
@@ -100,7 +105,7 @@ class DemoCallback(pl.Callback):
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
             print(f"Logged fakes")
         except Exception as e:
-             print(f'{type(e).__name__}: {e}', file=sys.stderr)
+            print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 
 class ExceptionCallback(pl.Callback):
@@ -111,27 +116,29 @@ class ExceptionCallback(pl.Callback):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
-                   help='the training data directory')      
+                   help='the training data directory')
     p.add_argument('--name', type=str, required=True,
-                   help='the name of the run')                      
+                   help='the name of the run')
+    p.add_argument('--demo-dir', type=Path, required=True,
+                   help='path to a directory with audio files for demos')
     p.add_argument('--num-workers', type=int, default=2,
-                   help='number of CPU workers for the DataLoader')   
+                   help='number of CPU workers for the DataLoader')
     p.add_argument('--batch-size', type=int, default=8,
-                   help='number of audio samples per batch')   
+                   help='number of audio samples per batch')
     p.add_argument('--num-gpus', type=int, default=1,
-                   help='number of GPUs to use for training')  
+                   help='number of GPUs to use for training')
     # p.add_argument('--mono', type=int, default=True,
-    #                help='whether or not the model runs in mono')  
+    #                help='whether or not the model runs in mono')
     p.add_argument('--pqmf-bands', type=int, default=1,
-                   help='number of sub-bands for the PQMF filter')  
+                   help='number of sub-bands for the PQMF filter')
     p.add_argument('--sample-size', type=int, default=65536,
-                   help='Number of samples to train on, must be a multiple of 65536')  
+                   help='Number of samples to train on, must be a multiple of 65536')
     p.add_argument('--demo-every', type=int, default=1000,
-                   help='Number of steps between demos')  
+                   help='Number of steps between demos')
     p.add_argument('--data-repeats', type=int, default=1,
-                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')        
+                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')
     p.add_argument('--style-latent-size', type=int, default=512,
-                   help='Size of the style latents')                
+                   help='Size of the style latents')
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
@@ -141,7 +148,8 @@ def main():
     model = LightningDiffusion(args)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     wandb_logger.watch(model.diffusion)
-    ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
+    ckpt_callback = pl.callbacks.ModelCheckpoint(
+        every_n_train_steps=10000, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
 
@@ -160,6 +168,7 @@ def main():
     )
 
     trainer.fit(model, train_dl)
+
 
 if __name__ == '__main__':
     main()
