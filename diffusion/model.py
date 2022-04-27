@@ -206,7 +206,7 @@ class LightningDiffusion(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
         
-        self.encoder = GlobalEncoder()
+        self.encoder = GlobalEncoder(global_args.latent_size)
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = AudioDiffusion(global_args)
         self.diffusion_ema = deepcopy(self.diffusion)
