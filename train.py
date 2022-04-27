@@ -144,6 +144,8 @@ def main():
                    help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')
     p.add_argument('--style-latent-size', type=int, default=512,
                    help='Size of the style latents')
+    p.add_argument('--accum-batches', type=int, default=8,
+                   help='Batches for gradient accumulation')                   
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
@@ -165,6 +167,7 @@ def main():
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
+        accumulate_grad_batches=args.accum_batches,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
