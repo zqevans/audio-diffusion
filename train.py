@@ -147,7 +147,7 @@ def main():
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
-    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
+    train_dl = data.DataLoader(train_set, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
     model = LightningDiffusion(args)
