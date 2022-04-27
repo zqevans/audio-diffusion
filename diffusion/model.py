@@ -195,6 +195,10 @@ class AudioDiffusion(nn.Module):
                 )
         self.net = block
 
+        with torch.no_grad():
+            for param in self.net.parameters():
+                param *= 0.5
+
     def forward(self, input, t, cond_embed):
         self.state['cond'] = cond_embed
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)

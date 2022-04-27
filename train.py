@@ -47,6 +47,7 @@ class DemoCallback(pl.Callback):
         self.demo_dir = global_args.demo_dir
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
+        self.demo_steps = global_args.demo_steps
         self.ms_encoder = MidSideEncoding()
         self.pad_crop = PadCrop(global_args.sample_size)
 
@@ -82,7 +83,7 @@ class DemoCallback(pl.Callback):
         audio_batch = audio_batch.to(module.device)
 
         with eval_mode(module):
-            fakes = sample(module, audio_batch, 500, 1)
+            fakes = sample(module, audio_batch, self.demo_steps, 1)
 
         # undo the PQMF encoding
         #fakes = self.pqmf.inverse(fakes.cpu())
@@ -135,6 +136,10 @@ def main():
                    help='Number of samples to train on, must be a multiple of 65536')
     p.add_argument('--demo-every', type=int, default=1000,
                    help='Number of steps between demos')
+    p.add_argument('--demo-steps', type=int, default=500,
+                   help='Number of denoising steps for the demos')                   
+    p.add_argument('--checkpoint-every', type=int, default=20000,
+                   help='Number of steps between checkpoints')
     p.add_argument('--data-repeats', type=int, default=1,
                    help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')
     p.add_argument('--style-latent-size', type=int, default=512,
@@ -149,7 +154,7 @@ def main():
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     wandb_logger.watch(model.diffusion)
     ckpt_callback = pl.callbacks.ModelCheckpoint(
-        every_n_train_steps=10000, save_top_k=-1)
+        every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
 
