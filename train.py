@@ -147,7 +147,7 @@ def main():
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
-    train_dl = data.DataLoader(train_set, shuffle=True,
+    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
     model = LightningDiffusion(args)
@@ -165,7 +165,6 @@ def main():
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
-        auto_scale_batch_size=True,
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
