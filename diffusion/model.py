@@ -152,8 +152,6 @@ class AudioDiffusion(nn.Module):
         #Number of input/output audio channels for the model
         n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
 
-        self.encoder = GlobalEncoder()
-
         self.timestep_embed = FourierFeatures(1, 16)
 
         self.state = {}
@@ -197,8 +195,8 @@ class AudioDiffusion(nn.Module):
                 )
         self.net = block
 
-    def forward(self, input, t):
-        self.state['cond'] = self.encoder(input)
+    def forward(self, input, t, cond_embed):
+        self.state['cond'] = cond_embed
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
         out = self.net(torch.cat([input, timestep_embed], dim=1))
         self.state.clear()
@@ -207,6 +205,8 @@ class AudioDiffusion(nn.Module):
 class LightningDiffusion(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
+        
+        self.encoder = GlobalEncoder()
         self.model = AudioDiffusion(global_args)
         self.model_ema = deepcopy(self.model)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
@@ -225,6 +225,7 @@ class LightningDiffusion(pl.LightningModule):
         reals = batch[0]
     
         #reals = self.pqmf(reals)
+        style_latents = self.encoder(reals)
 
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
@@ -239,7 +240,7 @@ class LightningDiffusion(pl.LightningModule):
         targets = noise * alphas - reals * sigmas
 
         # Compute the model output and the loss.
-        v = self(noised_reals, t)
+        v = self(noised_reals, t, style_latents)
         return F.mse_loss(v, targets)
 
     def training_step(self, batch, batch_idx):
