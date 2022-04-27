@@ -81,17 +81,22 @@ class DemoCallback(pl.Callback):
         #undo the PQMF encoding
         #fakes = self.pqmf.inverse(fakes.cpu())
         try:
+            print("Making log dict")
             log_dict = {}
             for i, fake in enumerate(fakes):
-                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
                 
+                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
+                print(f"Decoding fake {i}")
                 fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            
+                print(f"Saving fake {i}")
                 torchaudio.save(filename, fake, 44100)
+                print(f"Adding log_dict item for fake {i}")
                 log_dict[f'demo_{i}'] = wandb.Audio(filename,
                                                     sample_rate=44100,
                                                     caption=f'Demo {i}')
+            print(f"Logging fakes")
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
+            print(f"Logged fakes")
         except Exception as e:
              print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
