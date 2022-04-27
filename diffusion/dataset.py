@@ -12,7 +12,7 @@ class SampleDataset(torch.utils.data.Dataset):
     self.filenames = []
 
     self.augs = torch.nn.Sequential(
-      RandomGain(0.5, 1.0),
+      #RandomGain(0.9, 1.0),
       PadCrop(global_args.sample_size),
     )
 
