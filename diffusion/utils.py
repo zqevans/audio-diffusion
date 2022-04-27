@@ -14,7 +14,7 @@ class PadCrop(nn.Module):
 
     def __call__(self, signal):
         n, s = signal.shape
-        start = torch.randint(0, max(0, s - self.n_samples) + 1, []).item()
+        start = 0 #torch.randint(0, max(0, s - self.n_samples) + 1, []).item()
         end = start + self.n_samples
         output = signal.new_zeros([n, self.n_samples])
         output[:, :min(s, self.n_samples)] = signal[:, start:end]
