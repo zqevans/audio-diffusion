@@ -80,18 +80,20 @@ class DemoCallback(pl.Callback):
 
         #undo the PQMF encoding
         #fakes = self.pqmf.inverse(fakes.cpu())
-
-        log_dict = {}
-        for i, fake in enumerate(fakes):
-            filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
+        try:
+            log_dict = {}
+            for i, fake in enumerate(fakes):
+                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
+                
+                fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
             
-            fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-        
-            torchaudio.save(filename, fake, 44100)
-            log_dict[f'demo_{i}'] = wandb.Audio(filename,
-                                                sample_rate=44100,
-                                                caption=f'Demo {i}')
-        trainer.logger.experiment.log(log_dict, step=trainer.global_step)
+                torchaudio.save(filename, fake, 44100)
+                log_dict[f'demo_{i}'] = wandb.Audio(filename,
+                                                    sample_rate=44100,
+                                                    caption=f'Demo {i}')
+            trainer.logger.experiment.log(log_dict, step=trainer.global_step)
+        except Exception as e:
+             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 
 class ExceptionCallback(pl.Callback):
@@ -113,7 +115,7 @@ def main():
                    help='number of GPUs to use for training')  
     # p.add_argument('--mono', type=int, default=True,
     #                help='whether or not the model runs in mono')  
-    p.add_argument('--pqmf-bands', type=int, default=4,
+    p.add_argument('--pqmf-bands', type=int, default=1,
                    help='number of sub-bands for the PQMF filter')  
     p.add_argument('--sample-size', type=int, default=65536,
                    help='Number of samples to train on, must be a multiple of 65536')  
@@ -125,10 +127,6 @@ def main():
                    help='Size of the style latents')                
     args = p.parse_args()
 
-    bottom_sample_size = args.sample_size / args.pqmf_bands / (2**12)
-
-    print(f'bottom sample size: {bottom_sample_size}')
-
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
@@ -139,6 +137,9 @@ def main():
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
+
+    bottom_sample_size = args.sample_size / (2**model.diffusion.depth)
+    print(f'bottom sample size: {bottom_sample_size}')
 
     trainer = pl.Trainer(
         gpus=args.num_gpus,

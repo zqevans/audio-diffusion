@@ -118,7 +118,7 @@ class ResConvBlock(ResidualBlock):
 class GlobalEncoder(nn.Sequential):
     def __init__(self, latent_size):
         c_in = 2
-        c_mults = [64, 64, 128, 128] + [latent_size] * 8
+        c_mults = [64, 64, 128, 128] + [latent_size] * 10
         layers = []
         c_mult_prev = c_in
         for i, c_mult in enumerate(c_mults):
@@ -147,7 +147,7 @@ class AudioDiffusion(nn.Module):
 
         c_mults = [128, 128, 256, 256] + [512] * 8
        
-        depth = len(c_mults)
+        self.depth = len(c_mults)
 
         #Number of input/output audio channels for the model
         n_io_channels = 2 # * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
@@ -156,13 +156,13 @@ class AudioDiffusion(nn.Module):
 
         self.state = {}
 
-        attn_layer = depth - 5
+        attn_layer = self.depth - 5
 
         block = nn.Identity()
 
         conv_block = partial(ResModConvBlock, self.state, global_args.style_latent_size)
 
-        for i in range(depth, 0, -1):
+        for i in range(self.depth, 0, -1):
             c = c_mults[i - 1]
             if i > 1:
                 c_prev = c_mults[i - 2]
@@ -175,7 +175,7 @@ class AudioDiffusion(nn.Module):
                     conv_block(c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     block,
-                    conv_block(c * 2 if i != depth else c, c, c),
+                    conv_block(c * 2 if i != self.depth else c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
                     conv_block(c, c, c),
                     SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
