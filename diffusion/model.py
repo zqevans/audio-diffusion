@@ -58,8 +58,8 @@ class ResModConvBlock(ResidualBlock):
             Modulation1d(state, feats_in, c_mid),
             nn.ReLU(inplace=True),
             nn.Conv1d(c_mid, c_out, 5, padding=2),
-            nn.GroupNorm(1, c_mid, affine=False) if not is_last else nn.Identity(),
-            Modulation1d(state, feats_in, c_mid) if not is_last else nn.Identity(),
+            nn.GroupNorm(1, c_out, affine=False) if not is_last else nn.Identity(),
+            Modulation1d(state, feats_in, c_out) if not is_last else nn.Identity(),
             nn.ReLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
 
