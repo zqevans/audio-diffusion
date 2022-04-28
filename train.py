@@ -54,7 +54,8 @@ class DemoCallback(pl.Callback):
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        if (trainer.global_step - 1) % self.demo_every != 0 or batch_idx != 0:
+        print(batch_idx)
+        if (batch_idx - 1) % self.demo_every != 0:
             return
 
         # noise = torch.zeros([4, 2, self.demo_samples])
