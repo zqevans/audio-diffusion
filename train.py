@@ -48,14 +48,14 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
         self.demo_steps = global_args.demo_steps
+        self.accum_batches = global_args.accum_batches
         self.ms_encoder = MidSideEncoding()
         self.pad_crop = PadCrop(global_args.sample_size)
 
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        print(trainer.global_step, self.demo_every, batch_idx)
-        if (trainer.global_step - 1) % self.demo_every != 0:
+        if (trainer.global_step - 1) % self.demo_every != 0 or batch_idx % self.accum_batches != 0:
             return
 
         # noise = torch.zeros([4, 2, self.demo_samples])
