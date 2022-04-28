@@ -167,7 +167,7 @@ def main():
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
-        accumulate_grad_batches=args.accum_batches,
+        accumulate_grad_batches={0:1, 1:args.accum_batches}, #Start without accumulation
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
