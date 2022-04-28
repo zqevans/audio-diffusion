@@ -10,7 +10,7 @@ from functools import partial
 
 from .utils import get_alphas_sigmas
 
-#from .pqmf import CachedPQMF as PQMF
+from .pqmf import CachedPQMF as PQMF
 
 @torch.no_grad()
 def ema_update(model, averaged_model, decay):
@@ -116,8 +116,8 @@ class ResConvBlock(ResidualBlock):
         ], skip)
 
 class GlobalEncoder(nn.Sequential):
-    def __init__(self, latent_size):
-        c_in = 2
+    def __init__(self, latent_size, io_channels):
+        c_in = io_channels
         c_mults = [64, 64, 128, 128] + [latent_size] * 10
         layers = []
         c_mult_prev = c_in
@@ -145,12 +145,12 @@ class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
 
-        c_mults = [128, 128, 256, 256] + [512] * 8
+        c_mults = [128, 128, 256, 256] + [512] * 10
        
         self.depth = len(c_mults)
 
         #Number of input/output audio channels for the model
-        n_io_channels = 2 # * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
+        n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
 
         self.timestep_embed = FourierFeatures(1, 16)
 
@@ -210,12 +210,12 @@ class LightningDiffusion(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
         
-        self.encoder = GlobalEncoder(global_args.style_latent_size)
+        self.encoder = GlobalEncoder(global_args.style_latent_size, 2 * global_args.pqmf_bands)
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = AudioDiffusion(global_args)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        #self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     def encode(self, *args, **kwargs):
         if self.training:
@@ -234,9 +234,9 @@ class LightningDiffusion(pl.LightningModule):
         # Get the audio files
         reals = batch[0]
     
-        #reals = self.pqmf(reals)
         style_latents = self.encode(reals)
 
+        reals = self.pqmf(reals)
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
 

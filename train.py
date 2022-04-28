@@ -16,7 +16,7 @@ import wandb
 from diffusion.inference import sample
 from diffusion.model import LightningDiffusion
 from diffusion.dataset import SampleDataset
-#from diffusion.pqmf import CachedPQMF as PQMF
+from diffusion.pqmf import CachedPQMF as PQMF
 from diffusion.utils import MidSideEncoding, PadCrop
 
 # Define utility functions
@@ -43,7 +43,7 @@ def eval_mode(model):
 class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
-        #self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
         self.demo_dir = global_args.demo_dir
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
@@ -59,19 +59,8 @@ class DemoCallback(pl.Callback):
             return
 
         last_demo_step = trainer.global_step
-        # noise = torch.zeros([4, 2, self.demo_samples])
-
-        # #noise = self.pqmf(noise)
-
-        # noise = torch.randn_like(noise)
-
-        # noise = noise.to(module.device)
-
-        # TODO: Load demo files, padcrop them, pass them in to the sampler
 
         demo_files = glob(f'{self.demo_dir}/**/*.wav', recursive=True)
-
-        print(demo_files)
 
         audio_batch = torch.zeros(len(demo_files), 2, self.demo_samples)
 
@@ -82,31 +71,26 @@ class DemoCallback(pl.Callback):
             audio = self.ms_encoder(audio)
             audio_batch[i] = audio
 
+        audio_batch = self.pqmf(audio_batch)
+
         audio_batch = audio_batch.to(module.device)
 
         with eval_mode(module):
             fakes = sample(module, audio_batch, self.demo_steps, 1)
 
         # undo the PQMF encoding
-        #fakes = self.pqmf.inverse(fakes.cpu())
+        fakes = self.pqmf.inverse(fakes.cpu())
         try:
-            print("Making log dict")
             log_dict = {}
             for i, fake in enumerate(fakes):
 
                 filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
-                print(f"Decoding fake {i}")
-                fake = self.ms_encoder(
-                    fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                print(f"Saving fake {i}")
+                fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
                 torchaudio.save(filename, fake, 44100)
-                print(f"Adding log_dict item for fake {i}")
                 log_dict[f'demo_{i}'] = wandb.Audio(filename,
                                                     sample_rate=44100,
                                                     caption=f'Demo {i}')
-            print(f"Logging fakes")
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
-            print(f"Logged fakes")
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
@@ -130,9 +114,7 @@ def main():
                    help='number of audio samples per batch')
     p.add_argument('--num-gpus', type=int, default=1,
                    help='number of GPUs to use for training')
-    # p.add_argument('--mono', type=int, default=True,
-    #                help='whether or not the model runs in mono')
-    p.add_argument('--pqmf-bands', type=int, default=1,
+    p.add_argument('--pqmf-bands', type=int, default=8,
                    help='number of sub-bands for the PQMF filter')
     p.add_argument('--sample-size', type=int, default=65536,
                    help='Number of samples to train on, must be a multiple of 65536')
