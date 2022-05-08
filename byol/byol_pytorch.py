@@ -1,5 +1,7 @@
 """
 This implementation based on https://github.com/lucidrains/byol-pytorch/ by Phil Wang
+
+Modified to work for audio inputs
 """
 import copy
 import random
@@ -172,7 +174,8 @@ class BYOL(nn.Module):
     def __init__(
         self,
         net,
-        input_shape,
+        n_channels,
+        n_samples,
         hidden_layer = -1,
         projection_size = 256,
         projection_hidden_size = 4096,
@@ -201,8 +204,8 @@ class BYOL(nn.Module):
         device = get_module_device(net)
         self.to(device)
 
-        # send a mock tensor to instantiate singleton parameters
-        self.forward(torch.randn(2, *input_shape, device=device))
+        # send a mock audio tensor to instantiate singleton parameters
+        self.forward(torch.randn(2, n_channels, n_samples, device=device))
 
     @singleton('target_encoder')
     def _get_target_encoder(self):

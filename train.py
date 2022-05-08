@@ -137,8 +137,7 @@ def main():
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
-    ckpt_callback = pl.callbacks.ModelCheckpoint(
-        every_n_train_steps=args.checkpoint_every, save_top_k=-1)
+    ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
     
