@@ -303,6 +303,7 @@ class LightningDiffusion(pl.LightningModule):
         reals = self.pqmf(reals)
 
         style_latents = self.encode(reals)
+        
         # Sample timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(reals)
 
