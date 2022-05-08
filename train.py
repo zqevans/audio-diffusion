@@ -2,6 +2,7 @@
 import argparse
 from contextlib import contextmanager
 from pathlib import Path
+from random import randint
 import sys
 from glob import glob
 
@@ -11,13 +12,16 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 import torch
 from torch.utils import data
 import torchaudio
+from torchaudio import transforms as T
 import wandb
+
+from byol.byol_pytorch import RandomApply
 
 from diffusion.inference import sample
 from diffusion.model import LightningDiffusion, AudioPerceiverEncoder, SelfSupervisedLearner, Transpose
 from diffusion.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from diffusion.utils import MidSideEncoding, PadCrop
+from diffusion.utils import MidSideEncoding, PadCrop, RandomGain
 
 # Define utility functions
 
@@ -143,12 +147,30 @@ def main():
     encoder = AudioPerceiverEncoder(args)
 
     # Transform to go from data loader to encoder
-    encoder_tf = Transpose(-2, -1)
+    encoder_tf = torch.nn.Sequential(
+        MidSideEncoding(),
+        Transpose(-2, -1),
+    )
+
+    sr = 44100
+
+    #Training augmentations for the PYOL
+    pyol_augs = torch.nn.Sequential(
+        RandomApply(
+            RandomGain(0.8, 1),
+            0.8
+        ),      
+        RandomApply(
+            T.PitchShift(sr, randint(-3, 3)),
+            0.3
+        )  
+    )
 
     latent_learner = SelfSupervisedLearner(
         encoder, 
         torch.randn(2, 2, args.sample_size),
         input_tf = encoder_tf,
+        augment_fn=pyol_augs,
         hidden_layer=-1
     )
     wandb_logger.watch(latent_learner.learner)
