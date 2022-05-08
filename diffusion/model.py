@@ -262,7 +262,7 @@ class AudioDiffusion(nn.Module):
 
 
 class SelfSupervisedLearner(pl.LightningModule):
-    def __init__(self, net, init_tensor, input_tf=None, **kwargs):
+    def __init__(self, net, init_tensor, augment_fn, input_tf=None, **kwargs):
         super().__init__()
         self.input_tf = input_tf
 
@@ -270,7 +270,7 @@ class SelfSupervisedLearner(pl.LightningModule):
         if self.input_tf is not None:
             init_tensor = self.input_tf(init_tensor)
 
-        self.learner = BYOL(net, init_tensor, **kwargs)
+        self.learner = BYOL(net, init_tensor, augment_fn=augment_fn, **kwargs)
 
     def forward(self, inputs):
         inputs = inputs[0]
