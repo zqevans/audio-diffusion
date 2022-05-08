@@ -132,7 +132,10 @@ def main():
     p.add_argument('--style-latent-size', type=int, default=512,
                    help='Size of the style latents')
     p.add_argument('--accum-batches', type=int, default=8,
-                   help='Batches for gradient accumulation')                   
+                   help='Batches for gradient accumulation')        
+    p.add_argument('--encoder-epochs', type=int, default=200,
+                   help='Number of to train the encoder')                           
+    p.add_argument('--skip-diffusion', type=bool, default=False, help='If true, diffusion model will not be trained')           
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
@@ -159,11 +162,7 @@ def main():
         RandomApply(
             RandomGain(0.8, 1),
             0.8
-        ),      
-        RandomApply(
-            T.PitchShift(sr, randint(-3, 3)),
-            0.3
-        )  
+        )
     )
 
     latent_learner = SelfSupervisedLearner(
@@ -183,26 +182,28 @@ def main():
         callbacks=[ckpt_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
-        max_epochs=100,
+        max_epochs=args.encoder_epochs,
     )
 
     latent_trainer.fit(latent_learner, train_dl)
 
-    diffusion_model = LightningDiffusion(encoder, args)
-    wandb_logger.watch(diffusion_model.diffusion)
-    
-    diffusion_trainer = pl.Trainer(
-        gpus=args.num_gpus,
-        strategy='ddp',
-        precision=16,
-        accumulate_grad_batches={0:1, 1:args.accum_batches}, #Start without accumulation
-        callbacks=[ckpt_callback, demo_callback, exc_callback],
-        logger=wandb_logger,
-        log_every_n_steps=1,
-        max_epochs=10000000,
-    )
+    if not args.skip_diffusion:
 
-    diffusion_trainer.fit(diffusion_model, train_dl)
+        diffusion_model = LightningDiffusion(encoder, args)
+        wandb_logger.watch(diffusion_model.diffusion)
+        
+        diffusion_trainer = pl.Trainer(
+            gpus=args.num_gpus,
+            strategy='ddp',
+            precision=16,
+            accumulate_grad_batches={0:1, 1:args.accum_batches}, #Start without accumulation
+            callbacks=[ckpt_callback, demo_callback, exc_callback],
+            logger=wandb_logger,
+            log_every_n_steps=1,
+            max_epochs=10000000,
+        )
+
+        diffusion_trainer.fit(diffusion_model, train_dl)
 
 
 if __name__ == '__main__':
