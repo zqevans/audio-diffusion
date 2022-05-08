@@ -2,6 +2,7 @@ from copy import deepcopy
 import math
 from perceiver_pytorch import Perceiver
 import pytorch_lightning as pl
+from byol.byol_pytorch import BYOL
 import torch
 from torch import nn
 from torch import optim
@@ -11,6 +12,7 @@ from functools import partial
 from .utils import get_alphas_sigmas
 
 from .pqmf import CachedPQMF as PQMF
+
 
 @torch.no_grad()
 def ema_update(model, averaged_model, decay):
@@ -30,6 +32,7 @@ def ema_update(model, averaged_model, decay):
     for name, buf in model_buffers.items():
         averaged_buffers[name].copy_(buf)
 
+
 class ResidualBlock(nn.Module):
     def __init__(self, main, skip=None):
         super().__init__()
@@ -38,6 +41,7 @@ class ResidualBlock(nn.Module):
 
     def forward(self, input):
         return self.main(input) + self.skip(input)
+
 
 class Modulation1d(nn.Module):
     def __init__(self, state, feats_in, c_out):
@@ -49,6 +53,7 @@ class Modulation1d(nn.Module):
         scales, shifts = self.layer(self.state['cond']).chunk(2, dim=-1)
         return torch.addcmul(shifts[..., None], input, scales[..., None] + 1)
 
+
 class ResModConvBlock(ResidualBlock):
     def __init__(self, state, feats_in, c_in, c_mid, c_out, is_last=False):
         skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
@@ -58,10 +63,13 @@ class ResModConvBlock(ResidualBlock):
             Modulation1d(state, feats_in, c_mid),
             nn.ReLU(inplace=True),
             nn.Conv1d(c_mid, c_out, 5, padding=2),
-            nn.GroupNorm(1, c_out, affine=False) if not is_last else nn.Identity(),
-            Modulation1d(state, feats_in, c_out) if not is_last else nn.Identity(),
+            nn.GroupNorm(
+                1, c_out, affine=False) if not is_last else nn.Identity(),
+            Modulation1d(state, feats_in,
+                         c_out) if not is_last else nn.Identity(),
             nn.ReLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
+
 
 class SelfAttention1d(nn.Module):
     def __init__(self, c_in, n_head=1):
@@ -75,12 +83,14 @@ class SelfAttention1d(nn.Module):
     def forward(self, input):
         n, c, s = input.shape
         qkv = self.qkv_proj(self.norm(input))
-        qkv = qkv.view([n, self.n_head * 3, c // self.n_head, s]).transpose(2, 3)
+        qkv = qkv.view(
+            [n, self.n_head * 3, c // self.n_head, s]).transpose(2, 3)
         q, k, v = qkv.chunk(3, dim=1)
         scale = k.shape[3]**-0.25
         att = ((q * scale) @ (k.transpose(2, 3) * scale)).softmax(3)
         y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
         return input + self.out_proj(y)
+
 
 class SkipBlock(nn.Module):
     def __init__(self, *main):
@@ -90,18 +100,22 @@ class SkipBlock(nn.Module):
     def forward(self, input):
         return torch.cat([self.main(input), input], dim=1)
 
+
 class FourierFeatures(nn.Module):
     def __init__(self, in_features, out_features, std=1.):
         super().__init__()
         assert out_features % 2 == 0
-        self.weight = nn.Parameter(torch.randn([out_features // 2, in_features]) * std)
+        self.weight = nn.Parameter(torch.randn(
+            [out_features // 2, in_features]) * std)
 
     def forward(self, input):
         f = 2 * math.pi * input @ self.weight.T
         return torch.cat([f.cos(), f.sin()], dim=-1)
 
+
 def expand_to_planes(input, shape):
     return input[..., None].repeat([1, 1, shape[2]])
+
 
 class ResConvBlock(ResidualBlock):
     def __init__(self, c_in, c_mid, c_out, is_last=False):
@@ -115,6 +129,7 @@ class ResConvBlock(ResidualBlock):
             nn.ReLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
 
+
 class GlobalEncoder(nn.Sequential):
     def __init__(self, latent_size, io_channels):
         c_in = io_channels
@@ -124,7 +139,8 @@ class GlobalEncoder(nn.Sequential):
         for i, c_mult in enumerate(c_mults):
             is_last = i == len(c_mults) - 1
             layers.append(ResConvBlock(c_mult_prev, c_mult, c_mult))
-            layers.append(ResConvBlock(c_mult, c_mult, c_mult, is_last=is_last))
+            layers.append(ResConvBlock(
+                c_mult, c_mult, c_mult, is_last=is_last))
             if not is_last:
                 layers.append(nn.AvgPool1d(2))
             else:
@@ -133,24 +149,54 @@ class GlobalEncoder(nn.Sequential):
             c_mult_prev = c_mult
         super().__init__(*layers)
 
-#Encoder for local semantic information
-class LocalEncoder(nn.Module):
-    def __init__(self, global_args):
+# Perceiver-based BYOL
+class PYOL(nn.Module):
+    def __init__(self, global_args, augs):
         super().__init__()
+        self.net = Perceiver(
+            input_channels=3,          # number of channels for each token of the input
+            
+            input_axis=1,# number of axis for input data (1 for audio, 2 for images, 3 for video)            
+            num_freq_bands=20,# number of freq bands, with original value (2 * K + 1)
+            max_freq=100.,  # maximum frequency, hyperparameter depending on how fine the data is
+            depth=20,# depth of net. The shape of the final attention mechanism will be:
+                     # depth * (cross attention -> self_per_cross_attn * self attention)
+            num_latents=256,  # number of latents, or induced set points, or centroids. different papers giving it different names
+            latent_dim=512,            # latent dimension
+            cross_heads=1,             # number of heads for cross attention. paper said 1
+            latent_heads=8,            # number of heads for latent self attention, 8
+            cross_dim_head=64,         # number of dimensions per cross attention head
+            latent_dim_head=64,        # number of dimensions per latent self attention head
+            num_classes=global_args.style_latent_size,          # output number of classes
+            attn_dropout=0.,
+            ff_dropout=0.,
+            weight_tie_layers=False,# whether to weight tie layers (optional, as indicated in the diagram)
+            fourier_encode_data=True,  # whether to auto-fourier encode the data, using the input_axis given. defaults to True, but can be turned off if you are fourier encoding the data yourself
+            self_per_cross_attn=2      # number of self attention blocks per cross attention
+        )
+
+        self.learner = BYOL(
+            self.net,
+            (2, global_args.sample_size),
+            hidden_layer= -1,
+            augment_fn= augs
+        )
 
     def forward(self, input):
-        pass
+        return self.learner(input)
+
 
 class AudioDiffusion(nn.Module):
     def __init__(self, global_args):
         super().__init__()
 
         c_mults = [128, 128, 256, 256] + [512] * 10
-       
+
         self.depth = len(c_mults)
 
-        #Number of input/output audio channels for the model
-        n_io_channels = 2 * global_args.pqmf_bands #if global_args.mono else 2 * global_args.pqmf_bands
+        # Number of input/output audio channels for the model
+        # if global_args.mono else 2 * global_args.pqmf_bands
+        n_io_channels = 2 * global_args.pqmf_bands
 
         self.timestep_embed = FourierFeatures(1, 16)
 
@@ -160,7 +206,8 @@ class AudioDiffusion(nn.Module):
 
         block = nn.Identity()
 
-        conv_block = partial(ResModConvBlock, self.state, global_args.style_latent_size)
+        conv_block = partial(ResModConvBlock, self.state,
+                             global_args.style_latent_size)
 
         for i in range(self.depth, 0, -1):
             c = c_mults[i - 1]
@@ -169,19 +216,26 @@ class AudioDiffusion(nn.Module):
                 block = SkipBlock(
                     nn.AvgPool1d(2),
                     conv_block(c_prev, c, c),
-                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
                     conv_block(c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
                     conv_block(c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
                     block,
                     conv_block(c * 2 if i != self.depth else c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
                     conv_block(c, c, c),
-                    SelfAttention1d(c, c // 32) if i >= attn_layer else nn.Identity(),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
                     conv_block(c, c, c_prev),
-                    SelfAttention1d(c_prev, c_prev // 32) if i >= attn_layer else nn.Identity(),
-                    nn.Upsample(scale_factor=2 , mode='linear', align_corners=False),
+                    SelfAttention1d(c_prev, c_prev //
+                                    32) if i >= attn_layer else nn.Identity(),
+                    nn.Upsample(scale_factor=2, mode='linear',
+                                align_corners=False),
                 )
             else:
                 block = nn.Sequential(
@@ -201,16 +255,37 @@ class AudioDiffusion(nn.Module):
 
     def forward(self, input, t, cond_embed):
         self.state['cond'] = cond_embed
-        timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
+        timestep_embed = expand_to_planes(
+            self.timestep_embed(t[:, None]), input.shape)
         out = self.net(torch.cat([input, timestep_embed], dim=1))
         self.state.clear()
         return out
 
-class LightningDiffusion(pl.LightningModule):
-    def __init__(self, global_args):
+
+class SelfSupervisedLearner(pl.LightningModule):
+    def __init__(self, net, **kwargs):
         super().__init__()
-        
-        self.encoder = GlobalEncoder(global_args.style_latent_size, 2 * global_args.pqmf_bands)
+        self.learner = BYOL(net, **kwargs)
+
+    def forward(self, images):
+        return self.learner(images)
+
+    def training_step(self, images, _):
+        loss = self.forward(images)
+        return {'loss': loss}
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=1e-4)
+
+    def on_before_zero_grad(self, _):
+        if self.learner.use_momentum:
+            self.learner.update_moving_average()
+
+class LightningDiffusion(pl.LightningModule):
+    def __init__(self, encoder, global_args):
+        super().__init__()
+
+        self.encoder = encoder
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = AudioDiffusion(global_args)
         self.diffusion_ema = deepcopy(self.diffusion)
@@ -233,7 +308,7 @@ class LightningDiffusion(pl.LightningModule):
     def eval_batch(self, batch):
         # Get the audio files
         reals = batch[0]
-    
+
         reals = self.pqmf(reals)
 
         style_latents = self.encode(reals)
