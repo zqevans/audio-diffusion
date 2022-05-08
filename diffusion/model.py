@@ -129,6 +129,14 @@ class ResConvBlock(ResidualBlock):
             nn.ReLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
 
+class Transpose(nn.Sequential):
+    def __init__(self, dim0, dim1):
+        super().__init__()
+        self.dim0 = dim0
+        self.dim1 = dim1
+
+    def forward(self, input):
+        return torch.transpose(input, self.dim0, self.dim1)
 
 class GlobalEncoder(nn.Sequential):
     def __init__(self, latent_size, io_channels):
@@ -168,7 +176,7 @@ class AudioPerceiverEncoder(nn.Module):
             num_classes=global_args.style_latent_size,          # output number of classes
             attn_dropout=0.,
             ff_dropout=0.,
-            weight_tie_layers=False,# whether to weight tie layers (optional, as indicated in the diagram)
+            weight_tie_layers=True,# whether to weight tie layers (optional, as indicated in the diagram)
             fourier_encode_data=True,  # whether to auto-fourier encode the data, using the input_axis given. defaults to True, but can be turned off if you are fourier encoding the data yourself
             self_per_cross_attn=2      # number of self attention blocks per cross attention
         )
@@ -254,11 +262,20 @@ class AudioDiffusion(nn.Module):
 
 
 class SelfSupervisedLearner(pl.LightningModule):
-    def __init__(self, net, input_shape, **kwargs):
+    def __init__(self, net, init_tensor, input_tf=None, **kwargs):
         super().__init__()
-        self.learner = BYOL(net, input_shape[0], input_shape[1], **kwargs)
+        self.input_tf = input_tf
+
+        #Encode the mock input tensor as well
+        if self.input_tf is not None:
+            init_tensor = self.input_tf(init_tensor)
+
+        self.learner = BYOL(net, init_tensor, **kwargs)
 
     def forward(self, inputs):
+        if self.input_tf is not None:
+            inputs = self.input_tf(inputs)
+
         return self.learner(inputs)
 
     def training_step(self, inputs, _):

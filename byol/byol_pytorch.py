@@ -174,8 +174,7 @@ class BYOL(nn.Module):
     def __init__(
         self,
         net,
-        n_channels,
-        n_samples,
+        init_tensor,
         hidden_layer = -1,
         projection_size = 256,
         projection_hidden_size = 4096,
@@ -204,8 +203,8 @@ class BYOL(nn.Module):
         device = get_module_device(net)
         self.to(device)
 
-        # send a mock audio tensor to instantiate singleton parameters
-        self.forward(torch.randn(2, n_channels, n_samples, device=device))
+        # send a mock tensor to instantiate singleton parameters
+        self.forward(init_tensor)
 
     @singleton('target_encoder')
     def _get_target_encoder(self):
