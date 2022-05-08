@@ -256,7 +256,7 @@ class AudioDiffusion(nn.Module):
 class SelfSupervisedLearner(pl.LightningModule):
     def __init__(self, net, input_shape, **kwargs):
         super().__init__()
-        self.learner = BYOL(net, input_shape, **kwargs)
+        self.learner = BYOL(net, input_shape[0], input_shape[1] **kwargs)
 
     def forward(self, inputs):
         return self.learner(inputs)
