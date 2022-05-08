@@ -270,7 +270,7 @@ class SelfSupervisedLearner(pl.LightningModule):
         if self.input_tf is not None:
             init_tensor = self.input_tf(init_tensor)
 
-        self.learner = BYOL(net, init_tensor, augment_fn=augment_fn **kwargs)
+        self.learner = BYOL(net, init_tensor, augment_fn=augment_fn, **kwargs)
 
     def forward(self, inputs):
         inputs = inputs[0]
