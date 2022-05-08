@@ -282,6 +282,8 @@ class SelfSupervisedLearner(pl.LightningModule):
 
     def training_step(self, inputs, _):
         loss = self.forward(inputs)
+        log_dict = {'train/loss': loss.detach()}
+        self.log_dict(log_dict, prog_bar=True, on_step=True)
         return {'loss': loss}
 
     def configure_optimizers(self):
