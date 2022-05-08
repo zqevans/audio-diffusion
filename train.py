@@ -14,7 +14,7 @@ import torchaudio
 import wandb
 
 from diffusion.inference import sample
-from diffusion.model import LightningDiffusion, AudioPerceiverEncoder, SelfSupervisedLearner
+from diffusion.model import LightningDiffusion, AudioPerceiverEncoder, SelfSupervisedLearner, Transpose
 from diffusion.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from diffusion.utils import MidSideEncoding, PadCrop
@@ -99,7 +99,6 @@ class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
@@ -143,9 +142,13 @@ def main():
     
     encoder = AudioPerceiverEncoder(args)
 
+    # Transform to go from data loader to encoder
+    encoder_tf = Transpose(-2, -1)
+
     latent_learner = SelfSupervisedLearner(
         encoder, 
-        (2, args.sample_size),
+        torch.randn(2, 2, args.sample_size),
+        input_tf = encoder_tf,
         hidden_layer=-1
     )
     wandb_logger.watch(latent_learner.learner)
