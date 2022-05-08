@@ -149,13 +149,11 @@ class GlobalEncoder(nn.Sequential):
             c_mult_prev = c_mult
         super().__init__(*layers)
 
-# Perceiver-based BYOL
-class PYOL(nn.Module):
-    def __init__(self, global_args, augs):
+class AudioPerceiverEncoder(nn.Module):
+    def __init__(self, global_args):
         super().__init__()
         self.net = Perceiver(
-            input_channels=3,          # number of channels for each token of the input
-            
+            input_channels=2,          # number of channels for each token of the input
             input_axis=1,# number of axis for input data (1 for audio, 2 for images, 3 for video)            
             num_freq_bands=20,# number of freq bands, with original value (2 * K + 1)
             max_freq=100.,  # maximum frequency, hyperparameter depending on how fine the data is
@@ -175,15 +173,8 @@ class PYOL(nn.Module):
             self_per_cross_attn=2      # number of self attention blocks per cross attention
         )
 
-        self.learner = BYOL(
-            self.net,
-            (2, global_args.sample_size),
-            hidden_layer= -1,
-            augment_fn= augs
-        )
-
     def forward(self, input):
-        return self.learner(input)
+        return self.net(input)
 
 
 class AudioDiffusion(nn.Module):
@@ -263,15 +254,15 @@ class AudioDiffusion(nn.Module):
 
 
 class SelfSupervisedLearner(pl.LightningModule):
-    def __init__(self, net, **kwargs):
+    def __init__(self, net, input_shape, **kwargs):
         super().__init__()
-        self.learner = BYOL(net, **kwargs)
+        self.learner = BYOL(net, input_shape, **kwargs)
 
-    def forward(self, images):
-        return self.learner(images)
+    def forward(self, inputs):
+        return self.learner(inputs)
 
-    def training_step(self, images, _):
-        loss = self.forward(images)
+    def training_step(self, inputs, _):
+        loss = self.forward(inputs)
         return {'loss': loss}
 
     def configure_optimizers(self):

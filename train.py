@@ -14,7 +14,7 @@ import torchaudio
 import wandb
 
 from diffusion.inference import sample
-from diffusion.model import LightningDiffusion
+from diffusion.model import LightningDiffusion, AudioPerceiverEncoder, SelfSupervisedLearner
 from diffusion.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from diffusion.utils import MidSideEncoding, PadCrop
@@ -135,19 +135,39 @@ def main():
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
-
-    model = LightningDiffusion(args)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    wandb_logger.watch(model.diffusion)
+
     ckpt_callback = pl.callbacks.ModelCheckpoint(
         every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(args)
     exc_callback = ExceptionCallback()
+    
+    encoder = AudioPerceiverEncoder(args)
 
-    bottom_sample_size = args.sample_size / (2**model.diffusion.depth)
-    print(f'bottom sample size: {bottom_sample_size}')
+    latent_learner = SelfSupervisedLearner(
+        encoder, 
+        (2, args.sample_size),
+        hidden_layer=-1
+    )
+    wandb_logger.watch(latent_learner.learner)
 
-    trainer = pl.Trainer(
+    latent_trainer = pl.Trainer(
+        gpus=args.num_gpus,
+        strategy='ddp',
+        precision=16,
+        accumulate_grad_batches=args.accum_batches,
+        callbacks=[ckpt_callback, exc_callback],
+        logger=wandb_logger,
+        log_every_n_steps=1,
+        max_epochs=100,
+    )
+
+    latent_trainer.fit(latent_learner, train_dl)
+
+    diffusion_model = LightningDiffusion(encoder, args)
+    wandb_logger.watch(diffusion_model.diffusion)
+    
+    diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
@@ -158,7 +178,7 @@ def main():
         max_epochs=10000000,
     )
 
-    trainer.fit(model, train_dl)
+    diffusion_trainer.fit(diffusion_model, train_dl)
 
 
 if __name__ == '__main__':
