@@ -153,6 +153,7 @@ def main():
     encoder_tf = torch.nn.Sequential(
         MidSideEncoding(),
         Transpose(-2, -1),
+        PQMF(2, 70, args.pqmf_bands)
     )
 
     sr = 44100
