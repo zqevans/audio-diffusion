@@ -150,7 +150,7 @@ def main():
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
     validation_checkpoint = pl.callbacks.ModelCheckpoint(
-        monitor="validation",
+        monitor="val/loss",
         filename="best",
     )
 
