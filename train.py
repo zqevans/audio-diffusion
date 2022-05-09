@@ -145,7 +145,7 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
-    val_dl = data.DataLoader(val_set, args.batch_size, shuffle=True,
+    val_dl = data.DataLoader(val_set, args.batch_size,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
@@ -153,7 +153,7 @@ def main():
         monitor="validation",
         filename="best",
     )
-    
+
     last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
     
     exc_callback = ExceptionCallback()
