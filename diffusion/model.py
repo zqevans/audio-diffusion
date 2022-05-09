@@ -161,7 +161,7 @@ class AudioPerceiverEncoder(nn.Module):
     def __init__(self, global_args):
         super().__init__()
         self.net = Perceiver(
-            input_channels=2,          # number of channels for each token of the input
+            input_channels=2 * global_args.pqmf_bands,          # number of channels for each token of the input
             input_axis=1,# number of axis for input data (1 for audio, 2 for images, 3 for video)            
             num_freq_bands=128,# number of freq bands, with original value (2 * K + 1)
             max_freq=1000.,  # maximum frequency, hyperparameter depending on how fine the data is
