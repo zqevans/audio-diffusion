@@ -143,8 +143,12 @@ def main():
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
-    ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(args)
+    # validation_checkpoint = pl.callbacks.ModelCheckpoint(
+    #     monitor="validation",
+    #     filename="best",
+    # )
+    last_checkpoint = pl.callbacks.ModelCheckpoint(every_n_train_steps=500, filename="last")
+    
     exc_callback = ExceptionCallback()
     
     encoder = AudioPerceiverEncoder(args)
@@ -180,7 +184,7 @@ def main():
         strategy='ddp',
         precision=16,
         accumulate_grad_batches=args.accum_batches,
-        callbacks=[ckpt_callback, exc_callback],
+        callbacks=[last_checkpoint, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=args.encoder_epochs,
@@ -190,6 +194,8 @@ def main():
 
     if not args.skip_diffusion:
 
+        ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
+        demo_callback = DemoCallback(args)
         diffusion_model = LightningDiffusion(encoder, args)
         wandb_logger.watch(diffusion_model.diffusion)
         
