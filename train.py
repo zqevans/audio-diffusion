@@ -156,8 +156,8 @@ def main():
     # Transform to go from data loader to encoder
     encoder_tf = torch.nn.Sequential(
         MidSideEncoding(),
+        PQMF(2, 70, args.pqmf_bands),
         Transpose(-2, -1),
-        PQMF(2, 70, args.pqmf_bands)
     )
 
     sr = 44100
