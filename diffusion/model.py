@@ -286,6 +286,12 @@ class SelfSupervisedLearner(pl.LightningModule):
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return {'loss': loss}
 
+    def validation_step(self, inputs, _):
+        loss = self.forward(inputs)
+        log_dict = {'val/loss': loss.detach()}
+        self.log_dict(log_dict, prog_bar=True, on_step=True)
+        return {'validation': loss}
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-4)
 

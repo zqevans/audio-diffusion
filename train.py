@@ -138,16 +138,23 @@ def main():
     p.add_argument('--skip-diffusion', type=bool, default=False, help='If true, diffusion model will not be trained')           
     args = p.parse_args()
 
-    train_set = SampleDataset([args.training_dir], args)
+    samples_set = SampleDataset([args.training_dir], args)
+    train_set_size = int(len(samples_set) * 0.9)
+    val_set_size = len(samples_set) - train_set_size
+    train_set, val_set = torch.utils.data.random_split(samples_set, [train_set_size, val_set_size])
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
+                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+
+    val_dl = data.DataLoader(val_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
-    # validation_checkpoint = pl.callbacks.ModelCheckpoint(
-    #     monitor="validation",
-    #     filename="best",
-    # )
-    last_checkpoint = pl.callbacks.ModelCheckpoint(every_n_train_steps=500, filename="last")
+    validation_checkpoint = pl.callbacks.ModelCheckpoint(
+        monitor="validation",
+        filename="best",
+    )
+    
+    last_checkpoint = pl.callbacks.ModelCheckpoint(filename="last")
     
     exc_callback = ExceptionCallback()
     
@@ -184,13 +191,13 @@ def main():
         strategy='ddp',
         precision=16,
         accumulate_grad_batches=args.accum_batches,
-        callbacks=[last_checkpoint, exc_callback],
+        callbacks=[validation_checkpoint, last_checkpoint, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=args.encoder_epochs,
     )
 
-    latent_trainer.fit(latent_learner, train_dl)
+    latent_trainer.fit(latent_learner, train_dl, val_dl)
 
     if not args.skip_diffusion:
 
