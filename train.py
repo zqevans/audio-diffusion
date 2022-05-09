@@ -133,13 +133,13 @@ def main():
                    help='Size of the style latents')
     p.add_argument('--accum-batches', type=int, default=8,
                    help='Batches for gradient accumulation')        
-    p.add_argument('--encoder-epochs', type=int, default=200,
+    p.add_argument('--encoder-epochs', type=int, default=20,
                    help='Number of to train the encoder')                           
     p.add_argument('--skip-diffusion', type=bool, default=False, help='If true, diffusion model will not be trained')           
     args = p.parse_args()
 
     samples_set = SampleDataset([args.training_dir], args)
-    train_set_size = int(len(samples_set) * 0.9)
+    train_set_size = int(len(samples_set) * 0.99)
     val_set_size = len(samples_set) - train_set_size
     train_set, val_set = torch.utils.data.random_split(samples_set, [train_set_size, val_set_size])
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
