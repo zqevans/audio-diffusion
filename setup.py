@@ -17,6 +17,7 @@ setup(
         'pytorch_lightning', 
         'torch',
         'torchaudio',
+        'vector_quantize_pytorch',
         'wandb'
     ],
 )
