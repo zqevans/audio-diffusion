@@ -6,12 +6,16 @@ audio_diffusion.egg-info/SOURCES.txt
 audio_diffusion.egg-info/dependency_links.txt
 audio_diffusion.egg-info/requires.txt
 audio_diffusion.egg-info/top_level.txt
+byol/__init__.py
+byol/byol_pytorch.py
 diffusion/__init__.py
 diffusion/dataset.py
 diffusion/inference.py
 diffusion/model.py
 diffusion/pqmf.py
 diffusion/utils.py
+soundstream/__init__.py
+soundstream/soundstream.py
 test/__init__.py
 test/pqmf_test.py
 test/utils_test.py

@@ -116,19 +116,6 @@ class FourierFeatures(nn.Module):
 def expand_to_planes(input, shape):
     return input[..., None].repeat([1, 1, shape[2]])
 
-
-class ResConvBlock(ResidualBlock):
-    def __init__(self, c_in, c_mid, c_out, is_last=False):
-        skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
-        super().__init__([
-            nn.Conv1d(c_in, c_mid, 5, padding=2),
-            nn.GroupNorm(1, c_mid),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(c_mid, c_out, 5, padding=2),
-            nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
-            nn.ReLU(inplace=True) if not is_last else nn.Identity(),
-        ], skip)
-
 class Transpose(nn.Sequential):
     def __init__(self, dim0, dim1):
         super().__init__()
@@ -137,25 +124,6 @@ class Transpose(nn.Sequential):
 
     def forward(self, input):
         return torch.transpose(input, self.dim0, self.dim1)
-
-class GlobalEncoder(nn.Sequential):
-    def __init__(self, latent_size, io_channels):
-        c_in = io_channels
-        c_mults = [64, 64, 128, 128] + [latent_size] * 10
-        layers = []
-        c_mult_prev = c_in
-        for i, c_mult in enumerate(c_mults):
-            is_last = i == len(c_mults) - 1
-            layers.append(ResConvBlock(c_mult_prev, c_mult, c_mult))
-            layers.append(ResConvBlock(
-                c_mult, c_mult, c_mult, is_last=is_last))
-            if not is_last:
-                layers.append(nn.AvgPool1d(2))
-            else:
-                layers.append(nn.AdaptiveAvgPool1d(1))
-                layers.append(nn.Flatten())
-            c_mult_prev = c_mult
-        super().__init__(*layers)
 
 class AudioPerceiverEncoder(nn.Module):
     def __init__(self, global_args):

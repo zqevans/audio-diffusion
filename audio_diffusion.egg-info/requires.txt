@@ -1,7 +1,8 @@
 auraloss
 einops
-perceiver-pytorch
+perceiver_pytorch
 pytorch_lightning
 torch
 torchaudio
+vector_quantize_pytorch
 wandb

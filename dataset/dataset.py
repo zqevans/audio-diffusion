@@ -4,7 +4,7 @@ from torchaudio import transforms as T
 import random
 from glob import glob
 
-from .utils import MidSideEncoding, Stereo, RandomGain, PadCrop
+from ..diffusion.utils import MidSideEncoding, Stereo, RandomGain, PadCrop
 
 class SampleDataset(torch.utils.data.Dataset):
   def __init__(self, paths, global_args):
@@ -31,6 +31,8 @@ class SampleDataset(torch.utils.data.Dataset):
 
     self.num_files = len(self.filenames)
     self.data_repeats = global_args.data_repeats
+    
+    self.sr = global_args.sample_rate
 
   def __len__(self):
     return self.num_files * self.data_repeats
@@ -39,8 +41,8 @@ class SampleDataset(torch.utils.data.Dataset):
     audio_filename = self.filenames[idx % self.num_files]
     try:
       audio, sr = torchaudio.load(audio_filename)
-      if sr != 44100:
-          resample_tf = T.Resample(sr, 44100)
+      if sr != self.sr:
+          resample_tf = T.Resample(sr, self.sr)
           audio = resample_tf(audio)
           
       audio = audio.clamp(-1, 1)

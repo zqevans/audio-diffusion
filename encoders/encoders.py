@@ -1,13 +1,15 @@
+## Modified from https://github.com/wesbz/SoundStream/blob/main/net.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm
 
+from diffusion.model import ResidualBlock
+
 from vector_quantize_pytorch import ResidualVQ
 
 # Generator
-
-
 class CausalConv1d(nn.Conv1d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -97,67 +99,115 @@ class DecoderBlock(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+class ResConvBlock(ResidualBlock):
+    def __init__(self, c_in, c_mid, c_out, is_last=False):
+        skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
+        super().__init__([
+            nn.Conv1d(c_in, c_mid, 5, padding=2),
+            nn.GroupNorm(1, c_mid),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(c_mid, c_out, 5, padding=2),
+            nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
+            nn.ReLU(inplace=True) if not is_last else nn.Identity(),
+        ], skip)
 
-class Encoder(nn.Module):
-    def __init__(self, C, D, num_channels=1):
+class GlobalEncoder(nn.Sequential):
+    def __init__(self, latent_size, io_channels):
+        c_in = io_channels
+        c_mults = [64, 64, 128, 128] + [latent_size] * 10
+        layers = []
+        c_mult_prev = c_in
+        for i, c_mult in enumerate(c_mults):
+            is_last = i == len(c_mults) - 1
+            layers.append(ResConvBlock(c_mult_prev, c_mult, c_mult))
+            layers.append(ResConvBlock(
+                c_mult, c_mult, c_mult, is_last=is_last))
+            if not is_last:
+                layers.append(nn.AvgPool1d(2))
+            else:
+                layers.append(nn.AdaptiveAvgPool1d(1))
+                layers.append(nn.Flatten())
+            c_mult_prev = c_mult
+        super().__init__(*layers)
+
+class SoundStreamXLEncoder(nn.Module):
+    def __init__(self, n_channels, latent_dim, n_io_channels=1):
         super().__init__()
 
         self.layers = nn.Sequential(
-            CausalConv1d(in_channels=num_channels, out_channels=C, kernel_size=7),
+            CausalConv1d(in_channels=n_io_channels, out_channels=n_channels, kernel_size=7),
             nn.ELU(),
-            EncoderBlock(out_channels=2*C, stride=2),
+            EncoderBlock(out_channels=4*n_channels, stride=2),
             nn.ELU(),
-            EncoderBlock(out_channels=4*C, stride=4),
+            EncoderBlock(out_channels=4*n_channels, stride=2),
             nn.ELU(),
-            EncoderBlock(out_channels=8*C, stride=5),
+            EncoderBlock(out_channels=8*n_channels, stride=4),
             nn.ELU(),
-            EncoderBlock(out_channels=16*C, stride=8),
+            EncoderBlock(out_channels=16*n_channels, stride=5),
             nn.ELU(),
-            CausalConv1d(in_channels=16*C, out_channels=D, kernel_size=3)
+            EncoderBlock(out_channels=16*n_channels, stride=8),
+            nn.ELU(),
+            CausalConv1d(in_channels=16*n_channels, out_channels=latent_dim, kernel_size=3)
         )
 
     def forward(self, x):
         return self.layers(x)
 
 
-class Decoder(nn.Module):
-    def __init__(self, C, D,  num_channels=1):
+class SoundStreamXLDecoder(nn.Module):
+    def __init__(self, n_channels, latent_dim, num_io_channels=1):
         super().__init__()
         
         self.layers = nn.Sequential(
-            CausalConv1d(in_channels=D, out_channels=16*C, kernel_size=7),
+            CausalConv1d(in_channels=latent_dim, out_channels=16*n_channels, kernel_size=7),
             nn.ELU(),
-            DecoderBlock(out_channels=8*C, stride=8),
+            DecoderBlock(out_channels=8*n_channels, stride=8),
             nn.ELU(),
-            DecoderBlock(out_channels=4*C, stride=5),
+            DecoderBlock(out_channels=4*n_channels, stride=5),
             nn.ELU(),
-            DecoderBlock(out_channels=2*C, stride=4),
+            DecoderBlock(out_channels=2*n_channels, stride=4),
             nn.ELU(),
-            DecoderBlock(out_channels=C, stride=2),
+            DecoderBlock(out_channels=n_channels, stride=2),
             nn.ELU(),
-            CausalConv1d(in_channels=C, out_channels=num_channels, kernel_size=7)
+            CausalConv1d(in_channels=n_channels, out_channels=num_io_channels, kernel_size=7)
         )
     
     def forward(self, x):
         return self.layers(x)
 
 
-class SoundStream(nn.Module):
-    def __init__(self, C, D, n_q, codebook_size):
+class ResidualVQVAE(nn.Module):
+    def __init__(self, encoder, decoder, latent_dim, n_quantizers=8, codebook_size=1024):
         super().__init__()
 
-        self.encoder = Encoder(C=C, D=D)
+        self.encoder = encoder
+
         self.quantizer = ResidualVQ(
-            num_quantizers=n_q, dim=D, codebook_size=codebook_size,
-            kmeans_init=True, kmeans_iters=100, threshold_ema_dead_code=2
+            num_quantizers=n_quantizers, 
+            dim=latent_dim, 
+            codebook_size=codebook_size,
+            kmeans_init=True, 
+            kmeans_iters=100, 
+            threshold_ema_dead_code=2, 
+            channel_last=False,
+            use_cosine_sim=True,
+            orthogonal_reg_weight=10
         )
-        self.decoder = Decoder(C=C, D=D)
+
+        self.decoder = decoder
     
     def forward(self, x):
-        e = self.encoder(x)
-        quantized, _, _ = self.quantizer(e)
-        o = self.decoder(quantized)
-        return o
+        encoded = self.encoder(x)
+        quantized, indices, losses = self.quantizer(encoded)
+        decoded = self.decoder(quantized)
+        return decoded, indices, losses
+
+class SoundStreamXL(ResidualVQVAE):
+    def __init__(self, n_io_channels, n_feature_channels, latent_dim, *args, **kwargs):
+        self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)  
+        self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)
+
+        super().__init__(self.encoder, self.decoder, latent_dim, *args, **kwargs)
 
 # Wave-based Discriminator
 

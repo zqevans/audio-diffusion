@@ -15,13 +15,11 @@ import torchaudio
 from torchaudio import transforms as T
 import wandb
 
-from byol.byol_pytorch import RandomApply
-
 from dataset.dataset import SampleDataset
-from diffusion.inference import sample
-from diffusion.model import LightningDiffusion, AudioPerceiverEncoder, SelfSupervisedLearner, Transpose
 from diffusion.pqmf import CachedPQMF as PQMF
-from diffusion.utils import MidSideEncoding, PadCrop, RandomGain
+from diffusion.utils import PadCrop
+
+from encoders.learner import SoundStreamXLLearner
 
 # Define utility functions
 
@@ -52,7 +50,6 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_every = global_args.demo_every
         self.demo_steps = global_args.demo_steps
-        self.ms_encoder = MidSideEncoding()
         self.pad_crop = PadCrop(global_args.sample_size)
 
     @rank_zero_only
@@ -72,7 +69,6 @@ class DemoCallback(pl.Callback):
             audio, sr = torchaudio.load(demo_file)
             audio = audio.clamp(-1, 1)
             audio = self.pad_crop(audio)
-            audio = self.ms_encoder(audio)
             audio_batch[i] = audio
 
         audio_batch = self.pqmf(audio_batch)
@@ -117,24 +113,22 @@ def main():
                    help='number of audio samples per batch')
     p.add_argument('--num-gpus', type=int, default=1,
                    help='number of GPUs to use for training')
-    p.add_argument('--pqmf-bands', type=int, default=8,
+    p.add_argument('--pqmf-bands', type=int, default=16,
                    help='number of sub-bands for the PQMF filter')
     p.add_argument('--sample-rate', type=int, default=48000,
                    help='The sample rate of the audio')
     p.add_argument('--sample-size', type=int, default=16384,
                    help='Number of samples to train on, must be a multiple of 16384')
     p.add_argument('--demo-every', type=int, default=1000,
-                   help='Number of steps between demos')
-    p.add_argument('--demo-steps', type=int, default=500,
-                   help='Number of denoising steps for the demos')                   
+                   help='Number of steps between demos')                
     p.add_argument('--checkpoint-every', type=int, default=20000,
                    help='Number of steps between checkpoints')
-    p.add_argument('--data-repeats', type=int, default=1,
-                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')
     p.add_argument('--style-latent-size', type=int, default=512,
                    help='Size of the style latents')
     p.add_argument('--accum-batches', type=int, default=8,
-                   help='Batches for gradient accumulation')                                 
+                   help='Batches for gradient accumulation')        
+    p.add_argument('--encoder-epochs', type=int, default=200,
+                   help='Number of to train the encoder')                                
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
@@ -142,29 +136,30 @@ def main():
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
+    # validation_checkpoint = pl.callbacks.ModelCheckpoint(
+    #     monitor="validation",
+    #     filename="best",
+    # )
+    last_checkpoint = pl.callbacks.ModelCheckpoint(every_n_train_steps=500, filename="last")
+    
     exc_callback = ExceptionCallback()
-    
-    encoder = AudioPerceiverEncoder(args)
 
-    #TODO: Get pretrained encoder
+    soundstream = SoundStreamXLLearner(args)
 
-    ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(args)
-    diffusion_model = LightningDiffusion(encoder, args)
-    wandb_logger.watch(diffusion_model.diffusion)
-    
-    diffusion_trainer = pl.Trainer(
+    wandb_logger.watch(soundstream)
+
+    latent_trainer = pl.Trainer(
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
-        accumulate_grad_batches={0:1, 1:args.accum_batches}, #Start without accumulation
-        callbacks=[ckpt_callback, demo_callback, exc_callback],
+        accumulate_grad_batches=args.accum_batches,
+        callbacks=[last_checkpoint, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
-        max_epochs=10000000,
+        max_epochs=args.encoder_epochs,
     )
 
-    diffusion_trainer.fit(diffusion_model, train_dl)
+    latent_trainer.fit(soundstream, train_dl)
 
 
 if __name__ == '__main__':
