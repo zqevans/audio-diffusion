@@ -155,7 +155,7 @@ class SoundStreamXLEncoder(nn.Module):
 
 
 class SoundStreamXLDecoder(nn.Module):
-    def __init__(self, n_channels, latent_dim, num_io_channels=1):
+    def __init__(self, n_channels, latent_dim, n_io_channels=1):
         super().__init__()
 
         c_mults = [4, 4, 8, 8] + [16] * 8
@@ -171,7 +171,7 @@ class SoundStreamXLDecoder(nn.Module):
             layers.append(DecoderBlock(out_channels=c_mults[i-1]*n_channels, stride=2))
             layers.append(nn.ELU())
 
-        layers.append( CausalConv1d(in_channels=c_mults[0] * n_channels, out_channels=num_io_channels, kernel_size=7))
+        layers.append( CausalConv1d(in_channels=c_mults[0] * n_channels, out_channels=n_io_channels, kernel_size=7))
 
         self.layers = nn.Sequential(*layers)
     
