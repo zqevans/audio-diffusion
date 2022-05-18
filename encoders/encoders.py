@@ -130,25 +130,27 @@ class GlobalEncoder(nn.Sequential):
             c_mult_prev = c_mult
         super().__init__(*layers)
 
+
 class SoundStreamXLEncoder(nn.Module):
     def __init__(self, n_channels, latent_dim, n_io_channels=1):
         super().__init__()
+        
+        c_mults = [4, 4, 8, 8] + [16] * 8
+  
+        self.depth = len(c_mults)
 
-        self.layers = nn.Sequential(
+        layers = [
             CausalConv1d(in_channels=n_io_channels, out_channels=n_channels, kernel_size=7),
-            nn.ELU(),
-            EncoderBlock(out_channels=4*n_channels, stride=2),
-            nn.ELU(),
-            EncoderBlock(out_channels=4*n_channels, stride=2),
-            nn.ELU(),
-            EncoderBlock(out_channels=8*n_channels, stride=4),
-            nn.ELU(),
-            EncoderBlock(out_channels=16*n_channels, stride=5),
-            nn.ELU(),
-            EncoderBlock(out_channels=16*n_channels, stride=8),
-            nn.ELU(),
-            CausalConv1d(in_channels=16*n_channels, out_channels=latent_dim, kernel_size=3)
-        )
+            nn.ELU()
+        ]
+        
+        for i in range(self.depth):
+            layers.append(EncoderBlock(out_channels=c_mults[i]*n_channels, stride=2))
+            layers.append(nn.ELU())
+
+        layers.append(CausalConv1d(in_channels=16*n_channels, out_channels=latent_dim, kernel_size=3))
+
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.layers(x)
@@ -157,27 +159,30 @@ class SoundStreamXLEncoder(nn.Module):
 class SoundStreamXLDecoder(nn.Module):
     def __init__(self, n_channels, latent_dim, num_io_channels=1):
         super().__init__()
-        
-        self.layers = nn.Sequential(
+
+        c_mults = [4, 4, 8, 8] + [16] * 8
+    
+        self.depth = len(c_mults)
+
+        layers = [
             CausalConv1d(in_channels=latent_dim, out_channels=16*n_channels, kernel_size=7),
-            nn.ELU(),
-            DecoderBlock(out_channels=8*n_channels, stride=8),
-            nn.ELU(),
-            DecoderBlock(out_channels=4*n_channels, stride=5),
-            nn.ELU(),
-            DecoderBlock(out_channels=2*n_channels, stride=4),
-            nn.ELU(),
-            DecoderBlock(out_channels=n_channels, stride=2),
-            nn.ELU(),
-            CausalConv1d(in_channels=n_channels, out_channels=num_io_channels, kernel_size=7)
-        )
+            nn.ELU()
+        ]
+        
+        for i in range(self.depth, 0, -1):
+            layers.append(DecoderBlock(out_channels=c_mults[i-1]*n_channels, stride=2))
+            layers.append(nn.ELU())
+
+        layers.append( CausalConv1d(in_channels=c_mults[0] * n_channels, out_channels=num_io_channels, kernel_size=7))
+
+        self.layers = nn.Sequential(*layers)
     
     def forward(self, x):
         return self.layers(x)
 
 
 class ResidualVQVAE(nn.Module):
-    def __init__(self, encoder, decoder, latent_dim, n_quantizers=8, codebook_size=1024):
+    def __init__(self, encoder, decoder, latent_dim, n_quantizers=8, codebook_size=1024, sync_codebook=False):
         super().__init__()
 
         self.encoder = encoder
@@ -191,7 +196,8 @@ class ResidualVQVAE(nn.Module):
             threshold_ema_dead_code=2, 
             channel_last=False,
             use_cosine_sim=True,
-            orthogonal_reg_weight=10
+            orthogonal_reg_weight=10,
+            sync_codebook=sync_codebook
         )
 
         self.decoder = decoder
@@ -210,8 +216,6 @@ class SoundStreamXL(ResidualVQVAE):
         super().__init__(self.encoder, self.decoder, latent_dim, *args, **kwargs)
 
 # Wave-based Discriminator
-
-
 def WNConv1d(*args, **kwargs):
     return weight_norm(nn.Conv1d(*args, **kwargs))
 

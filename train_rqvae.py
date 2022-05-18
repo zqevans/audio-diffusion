@@ -136,11 +136,7 @@ def main():
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
-    # validation_checkpoint = pl.callbacks.ModelCheckpoint(
-    #     monitor="validation",
-    #     filename="best",
-    # )
-    last_checkpoint = pl.callbacks.ModelCheckpoint(every_n_train_steps=500, filename="last")
+    last_checkpoint = pl.callbacks.ModelCheckpoint(every_n_train_steps=2000, filename="last")
     
     exc_callback = ExceptionCallback()
 
