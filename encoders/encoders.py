@@ -1,9 +1,7 @@
 ## Modified from https://github.com/wesbz/SoundStream/blob/main/net.py
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm
 
 from diffusion.model import ResidualBlock
 
@@ -181,11 +179,12 @@ class SoundStreamXLDecoder(nn.Module):
         return self.layers(x)
 
 
-class ResidualVQVAE(nn.Module):
-    def __init__(self, encoder, decoder, latent_dim, n_quantizers=8, codebook_size=1024, sync_codebook=False):
+class SoundStreamXL(nn.Module):
+    def __init__(self, n_io_channels, n_feature_channels, latent_dim, n_quantizers=8, codebook_size=1024, sync_codebook=False):
         super().__init__()
 
-        self.encoder = encoder
+        self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)  
+        self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)
 
         self.quantizer = ResidualVQ(
             num_quantizers=n_quantizers, 
@@ -201,17 +200,8 @@ class ResidualVQVAE(nn.Module):
             sync_codebook=sync_codebook
         )
 
-        self.decoder = decoder
-    
     def forward(self, x):
         encoded = self.encoder(x)
         quantized, indices, losses = self.quantizer(encoded)
         decoded = self.decoder(quantized)
         return decoded, indices, losses
-
-class SoundStreamXL(ResidualVQVAE):
-    def __init__(self, n_io_channels, n_feature_channels, latent_dim, *args, **kwargs):
-        self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)  
-        self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)
-
-        super().__init__(self.encoder, self.decoder, latent_dim, *args, **kwargs)
