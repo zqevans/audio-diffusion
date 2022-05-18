@@ -28,16 +28,13 @@ class SampleDataset(torch.utils.data.Dataset):
       self.filenames += glob(f'{path}/**/*.aif', recursive=True)
       self.filenames += glob(f'{path}/**/*.mp3', recursive=True)
 
-    self.num_files = len(self.filenames)
-    self.data_repeats = global_args.data_repeats
-    
     self.sr = global_args.sample_rate
 
   def __len__(self):
-    return self.num_files * self.data_repeats
+    return len(self.filenames)
 
   def __getitem__(self, idx):
-    audio_filename = self.filenames[idx % self.num_files]
+    audio_filename = self.filenames[idx]
     try:
       audio, sr = torchaudio.load(audio_filename)
       if sr != self.sr:
