@@ -82,11 +82,11 @@ class SoundStreamXLLearner(LightningModule):
         self.time_loss = TimeDomainLoss(global_args.batch_size)
 
     def training_step(self, batch, batch_idx):
-        inputs, lengths_x = batch
+        inputs, _ = batch
         inputs = inputs.to(self.device)
 
         #Get the reconstructed signal
-        reconstructed, indices, vq_losses  = self.soundstream(inputs)
+        reconstructed, _, vq_losses  = self.soundstream(inputs)
 
         #Sum the commit losses
         vq_loss = torch.sum(vq_losses, -1)

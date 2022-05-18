@@ -107,14 +107,12 @@ def main():
                    help='the name of the run')
     p.add_argument('--demo-dir', type=Path, required=True,
                    help='path to a directory with audio files for demos')
-    p.add_argument('--num-workers', type=int, default=2,
+    p.add_argument('--num-workers', type=int, default=4,
                    help='number of CPU workers for the DataLoader')
     p.add_argument('--batch-size', type=int, default=8,
                    help='number of audio samples per batch')
     p.add_argument('--num-gpus', type=int, default=1,
                    help='number of GPUs to use for training')
-    p.add_argument('--pqmf-bands', type=int, default=16,
-                   help='number of sub-bands for the PQMF filter')
     p.add_argument('--sample-rate', type=int, default=48000,
                    help='The sample rate of the audio')
     p.add_argument('--sample-size', type=int, default=16384,
@@ -126,9 +124,7 @@ def main():
     p.add_argument('--style-latent-size', type=int, default=512,
                    help='Size of the style latents')
     p.add_argument('--accum-batches', type=int, default=8,
-                   help='Batches for gradient accumulation')        
-    p.add_argument('--encoder-epochs', type=int, default=200,
-                   help='Number of to train the encoder')                                
+                   help='Batches for gradient accumulation')                                 
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
@@ -152,7 +148,7 @@ def main():
         callbacks=[last_checkpoint, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
-        max_epochs=args.encoder_epochs,
+        max_epochs=100000,
     )
 
     latent_trainer.fit(soundstream, train_dl)

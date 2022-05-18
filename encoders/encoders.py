@@ -197,6 +197,7 @@ class ResidualVQVAE(nn.Module):
             channel_last=False,
             use_cosine_sim=True,
             orthogonal_reg_weight=10,
+            shared_codebook=True,
             sync_codebook=sync_codebook
         )
 
