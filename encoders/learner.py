@@ -76,7 +76,7 @@ class TimeDomainLoss(nn.Module):
 class SoundStreamXLLearner(LightningModule):
     def __init__(self, global_args):
         super().__init__()
-        self.soundstream = SoundStreamXL(n_io_channels=2, n_feature_channels=32, latent_dim=128, n_quantizers=8, codebook_size=1024, )     
+        self.soundstream = SoundStreamXL(n_io_channels=2, n_feature_channels=16, latent_dim=128, n_quantizers=8, codebook_size=1024, )     
 
         self.stft_loss = auraloss.freq.MelSTFTLoss(global_args.sample_rate, w_phs=1.0, device=self.device) 
 

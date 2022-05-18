@@ -53,20 +53,20 @@ class ResidualUnit(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, out_channels, stride):
+    def __init__(self, in_channels, out_channels, stride):
         super().__init__()
 
         self.layers = nn.Sequential(
-            ResidualUnit(in_channels=out_channels//2,
-                         out_channels=out_channels//2, dilation=1),
+            ResidualUnit(in_channels=in_channels,
+                         out_channels=in_channels, dilation=1),
             nn.ELU(),
-            ResidualUnit(in_channels=out_channels//2,
-                         out_channels=out_channels//2, dilation=3),
+            ResidualUnit(in_channels=in_channels,
+                         out_channels=in_channels, dilation=3),
             nn.ELU(),
-            ResidualUnit(in_channels=out_channels//2,
-                         out_channels=out_channels//2, dilation=9),
+            ResidualUnit(in_channels=in_channels,
+                         out_channels=in_channels, dilation=9),
             nn.ELU(),
-            CausalConv1d(in_channels=out_channels//2, out_channels=out_channels,
+            CausalConv1d(in_channels=in_channels, out_channels=out_channels,
                       kernel_size=2*stride, stride=stride)
         )
 
@@ -75,11 +75,11 @@ class EncoderBlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, out_channels, stride):
+    def __init__(self, in_channels, out_channels, stride):
         super().__init__()
 
         self.layers = nn.Sequential(
-            CausalConvTranspose1d(in_channels=2*out_channels,
+            CausalConvTranspose1d(in_channels=in_channels,
                                out_channels=out_channels,
                                kernel_size=2*stride, stride=stride),
             nn.ELU(),
@@ -138,15 +138,15 @@ class SoundStreamXLEncoder(nn.Module):
         self.depth = len(c_mults)
 
         layers = [
-            CausalConv1d(in_channels=n_io_channels, out_channels=n_channels, kernel_size=7),
+            CausalConv1d(in_channels=n_io_channels, out_channels=c_mults[0] * n_channels, kernel_size=7),
             nn.ELU()
         ]
         
-        for i in range(self.depth):
-            layers.append(EncoderBlock(out_channels=c_mults[i]*n_channels, stride=2))
+        for i in range(self.depth-1):
+            layers.append(EncoderBlock(in_channels=c_mults[i], out_channels=c_mults[i+1]*n_channels, stride=2))
             layers.append(nn.ELU())
 
-        layers.append(CausalConv1d(in_channels=16*n_channels, out_channels=latent_dim, kernel_size=3))
+        layers.append(CausalConv1d(in_channels=c_mults[-1]*n_channels, out_channels=latent_dim, kernel_size=3))
 
         self.layers = nn.Sequential(*layers)
 
@@ -163,15 +163,15 @@ class SoundStreamXLDecoder(nn.Module):
         self.depth = len(c_mults)
 
         layers = [
-            CausalConv1d(in_channels=latent_dim, out_channels=16*n_channels, kernel_size=7),
+            CausalConv1d(in_channels=latent_dim, out_channels=c_mults[-1]*n_channels, kernel_size=7),
             nn.ELU()
         ]
         
-        for i in range(self.depth, 0, -1):
-            layers.append(DecoderBlock(out_channels=c_mults[i-1]*n_channels, stride=2))
+        for i in range(self.depth-1, 0, -1):
+            layers.append(DecoderBlock(in_channels=c_mults[i], out_channels=c_mults[i-1]*n_channels, stride=2))
             layers.append(nn.ELU())
 
-        layers.append( CausalConv1d(in_channels=c_mults[0] * n_channels, out_channels=n_io_channels, kernel_size=7))
+        layers.append(CausalConv1d(in_channels=c_mults[0] * n_channels, out_channels=n_io_channels, kernel_size=7))
 
         self.layers = nn.Sequential(*layers)
     
