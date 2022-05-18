@@ -143,7 +143,7 @@ class SoundStreamXLEncoder(nn.Module):
         ]
         
         for i in range(self.depth-1):
-            layers.append(EncoderBlock(in_channels=c_mults[i], out_channels=c_mults[i+1]*n_channels, stride=2))
+            layers.append(EncoderBlock(in_channels=c_mults[i]*n_channels, out_channels=c_mults[i+1]*n_channels, stride=2))
             layers.append(nn.ELU())
 
         layers.append(CausalConv1d(in_channels=c_mults[-1]*n_channels, out_channels=latent_dim, kernel_size=3))
@@ -168,7 +168,7 @@ class SoundStreamXLDecoder(nn.Module):
         ]
         
         for i in range(self.depth-1, 0, -1):
-            layers.append(DecoderBlock(in_channels=c_mults[i], out_channels=c_mults[i-1]*n_channels, stride=2))
+            layers.append(DecoderBlock(in_channels=c_mults[i]*n_channels, out_channels=c_mults[i-1]*n_channels, stride=2))
             layers.append(nn.ELU())
 
         layers.append(CausalConv1d(in_channels=c_mults[0] * n_channels, out_channels=n_io_channels, kernel_size=7))
