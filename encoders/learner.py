@@ -107,5 +107,6 @@ class SoundStreamXLLearner(LightningModule):
         return {'loss': loss}
 
     def configure_optimizers(self):
-        self.optimizer = optim.Adam(self.soundstream.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        return optim.Adam(self.soundstream.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        
 
