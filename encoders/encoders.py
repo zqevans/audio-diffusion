@@ -135,8 +135,6 @@ class SoundStreamXLEncoder(nn.Module):
         
         c_mults = [1] + [2, 4, 4, 8, 16]
         strides =       [2, 2, 4, 5, 8]
-
-        assert len(c_mults) == len(strides), f'Length of c_mults ({len(c_mults)} does not match length of strides ({len(strides)})'
   
         self.depth = len(c_mults)
 
