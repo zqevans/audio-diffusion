@@ -232,7 +232,7 @@ class SoundStreamDecoder(nn.Module):
 
 
 
-class SoundStream(nn.Module):
+class SoundStreamXL(nn.Module):
     def __init__(self, n_io_channels, n_feature_channels, latent_dim, n_quantizers=8, codebook_size=1024, sync_codebook=False):
         super().__init__()
 
