@@ -76,23 +76,30 @@ class TimeDomainLoss(nn.Module):
 class SoundStreamXLLearner(LightningModule):
     def __init__(self, global_args):
         super().__init__()
-        self.soundstream = SoundStreamXL(n_io_channels=2, n_feature_channels=16, latent_dim=128, n_quantizers=8, codebook_size=1024, )     
-
-        self.stft_loss = auraloss.freq.MelSTFTLoss(global_args.sample_rate, w_phs=1.0, device=self.device) 
+        self.soundstream = SoundStreamXL(n_io_channels=2, n_feature_channels=16, latent_dim=128, n_quantizers=8, codebook_size=1024)     
 
         self.time_loss = TimeDomainLoss(global_args.batch_size)
+
+        self.sample_rate = global_args.sample_rate
 
     def training_step(self, batch, batch_idx):
         inputs, _ = batch
         inputs = inputs.to(self.device)
 
+        #Create loss function object in training step to ensure the proper device is selected
+        stft_loss = auraloss.freq.MelSTFTLoss(self.sample_rate, w_phs=1.0, device=self.device) 
+        print(f'input shape: {inputs.shape}')
+
         #Get the reconstructed signal
         reconstructed, _, vq_losses  = self.soundstream(inputs)
+
+        print(f'Reconstructed shape: {reconstructed.shape}')
+        print(f'vq_losses shape: {vq_losses.shape}')
 
         #Sum the commit losses
         vq_loss = torch.sum(vq_losses, -1)
 
-        freq_loss = self.stft_loss(inputs, reconstructed)
+        freq_loss = stft_loss(inputs, reconstructed)
 
         time_loss = self.time_loss(inputs, reconstructed)
 
@@ -101,7 +108,8 @@ class SoundStreamXLLearner(LightningModule):
         log_dict = {'train/loss': loss.detach(), 
                     'train/freq_loss': freq_loss.detach(), 
                     'train/time_loss': time_loss.detach(),
-                    'train/vq_loss': vq_loss.detach()
+                    'train/vq_loss': vq_loss.detach(),
+                    'train/vq_losses': vq_losses.detach()
                     }
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return {'loss': loss}

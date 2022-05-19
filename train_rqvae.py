@@ -115,8 +115,8 @@ def main():
                    help='number of GPUs to use for training')
     p.add_argument('--sample-rate', type=int, default=48000,
                    help='The sample rate of the audio')
-    p.add_argument('--sample-size', type=int, default=16384,
-                   help='Number of samples to train on, must be a multiple of 16384')
+    p.add_argument('--sample-size', type=int, default=64000,
+                   help='Number of samples to train on, must be a multiple of 640')
     p.add_argument('--demo-every', type=int, default=1000,
                    help='Number of steps between demos')                
     p.add_argument('--checkpoint-every', type=int, default=20000,
