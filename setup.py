@@ -6,10 +6,6 @@ setup(
     url='https://github.com/zqevans/audio-diffusion.git',
     author='Zach Evans',
     packages=find_packages(),    
-    dependency_links=[
-        "https://github.com/caillonantoine/cached_conv.git#egg=cached_conv",
-        "https://github.com/caillonantoine/UDLS.git#egg=udls",
-    ],
     install_requires=[
         'auraloss',
         'einops',
@@ -19,6 +15,8 @@ setup(
         'torch',
         'torchaudio',
         'vector-quantize-pytorch',
-        'wandb'
+        'wandb',
+        'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git#egg=cached_conv'
+        'udls @ git+https://github.com/caillonantoine/UDLS.git#egg=udls',
     ],
 )
