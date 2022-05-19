@@ -159,7 +159,10 @@ class SoundStreamXLDecoder(nn.Module):
         super().__init__()
 
         c_mults = [4, 4, 8, 8] + [16] * 8
+        c_strides = [2, 2, 4, 4, 5, 8]
     
+        assert len(c_mults) == len(c_strides), f'Length of c_mults ({len(c_mults)} does not match length of c_strides ({len(c_strides)})'
+
         self.depth = len(c_mults)
 
         layers = [
@@ -179,12 +182,62 @@ class SoundStreamXLDecoder(nn.Module):
         return self.layers(x)
 
 
-class SoundStreamXL(nn.Module):
+
+class SoundStreamEncoder(nn.Module):
+    def __init__(self, n_channels, latent_dim, n_io_channels=1):
+        super().__init__()
+
+        self.layers = nn.Sequential(
+            CausalConv1d(in_channels=n_io_channels, out_channels=n_channels, kernel_size=7),
+            nn.ELU(),
+            EncoderBlock(out_channels=2*n_channels, stride=2),
+            nn.ELU(),
+            EncoderBlock(out_channels=2*n_channels, stride=2),
+            nn.ELU(),
+            EncoderBlock(out_channels=4*n_channels, stride=4),
+            nn.ELU(),
+            EncoderBlock(out_channels=8*n_channels, stride=5),
+            nn.ELU(),
+            EncoderBlock(out_channels=16*n_channels, stride=8),
+            nn.ELU(),
+            CausalConv1d(in_channels=16*n_channels, out_channels=latent_dim, kernel_size=3)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+class SoundStreamDecoder(nn.Module):
+    def __init__(self, n_channels, latent_dim,  n_io_channels=1):
+        super().__init__()
+        
+        self.layers = nn.Sequential(
+            CausalConv1d(in_channels=latent_dim, out_channels=16*n_channels, kernel_size=7),
+            nn.ELU(),
+            DecoderBlock(out_channels=8*n_channels, stride=8),
+            nn.ELU(),
+            DecoderBlock(out_channels=4*n_channels, stride=5),
+            nn.ELU(),
+            DecoderBlock(out_channels=2*n_channels, stride=4),
+            nn.ELU(),
+            DecoderBlock(out_channels=2*n_channels, stride=2),
+            nn.ELU(),
+            DecoderBlock(out_channels=n_channels, stride=2),
+            nn.ELU(),
+            CausalConv1d(in_channels=n_channels, out_channels=n_io_channels, kernel_size=7)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+
+
+class SoundStream(nn.Module):
     def __init__(self, n_io_channels, n_feature_channels, latent_dim, n_quantizers=8, codebook_size=1024, sync_codebook=False):
         super().__init__()
 
-        self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)  
-        self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)
+        self.encoder = SoundStreamEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)  
+        self.decoder = SoundStreamDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)
 
         self.quantizer = ResidualVQ(
             num_quantizers=n_quantizers, 

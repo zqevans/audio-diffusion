@@ -143,7 +143,7 @@ def main():
     latent_trainer = pl.Trainer(
         gpus=args.num_gpus,
         strategy='ddp',
-        precision=16,
+        #precision=16,
         accumulate_grad_batches=args.accum_batches,
         callbacks=[last_checkpoint, exc_callback],
         logger=wandb_logger,
