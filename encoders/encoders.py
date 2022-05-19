@@ -181,7 +181,7 @@ class SoundStreamXLDecoder(nn.Module):
         return self.layers(x)
 
 class SoundStreamXL(nn.Module):
-    def __init__(self, n_io_channels, n_feature_channels, latent_dim, n_quantizers=8, codebook_size=1024, sync_codebook=False):
+    def __init__(self, n_io_channels, n_feature_channels, latent_dim, n_quantizers=8, codebook_size=1024):
         super().__init__()
 
         self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=latent_dim)  
@@ -195,10 +195,10 @@ class SoundStreamXL(nn.Module):
             kmeans_iters=100, 
             threshold_ema_dead_code=2, 
             channel_last=False,
-            use_cosine_sim=True,
-            orthogonal_reg_weight=10,
-            shared_codebook=True,
-            sync_codebook=sync_codebook
+            #use_cosine_sim=True,
+            #orthogonal_reg_weight=10,
+            #shared_codebook=True,
+            sync_codebook=True
         )
 
     def forward(self, x):

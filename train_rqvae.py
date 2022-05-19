@@ -128,7 +128,8 @@ def main():
     args = p.parse_args()
 
     train_set = SampleDataset([args.training_dir], args)
-    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
+    sampler = data.RandomSampler(train_set, replacement=True, num_samples = len(train_set) * 5)
+    train_dl = data.DataLoader(train_set, sampler=sampler, batch_size=args.batch_size,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
@@ -142,7 +143,7 @@ def main():
 
     latent_trainer = pl.Trainer(
         gpus=args.num_gpus,
-        strategy='ddp',
+        strategy="ddp_find_unused_parameters_false",
         #precision=16,
         accumulate_grad_batches=args.accum_batches,
         callbacks=[last_checkpoint, exc_callback],
