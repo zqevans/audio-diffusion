@@ -13,11 +13,12 @@ setup(
     install_requires=[
         'auraloss',
         'einops',
-        'perceiver_pytorch',
+        'nwt-pytorch',
+        'perceiver-pytorch',
         'pytorch_lightning', 
         'torch',
         'torchaudio',
-        'vector_quantize_pytorch',
+        'vector-quantize-pytorch',
         'wandb'
     ],
 )

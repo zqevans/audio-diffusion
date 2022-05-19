@@ -18,6 +18,7 @@ diffusion/utils.py
 encoders/__init__.py
 encoders/encoders.py
 encoders/learner.py
+encoders/losses.py
 encoders/ss_train.py
 test/__init__.py
 test/pqmf_test.py
