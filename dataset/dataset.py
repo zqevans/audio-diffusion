@@ -13,7 +13,7 @@ class SampleDataset(torch.utils.data.Dataset):
 
     self.augs = torch.nn.Sequential(
       #RandomGain(0.9, 1.0),
-      #PadCrop(global_args.sample_size),
+      PadCrop(global_args.sample_size),
     )
 
     self.encoding = torch.nn.Sequential(
