@@ -20,8 +20,8 @@ import wandb
 
 from dataset.dataset import SampleDataset
 from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_update
-from encoders.encoders import ResConvBlock
-#from vector_quantize_pytorch import ResidualVQ
+from encoders.encoders import ResConvBlock, SoundStreamXLEncoder
+from vector_quantize_pytorch import ResidualVQ
 
 class Encoder(nn.Sequential):
     def __init__(self, codes, io_channels):
@@ -73,7 +73,7 @@ class DiffusionDecoder(nn.Module):
                 )
             else:
                 block = nn.Sequential(
-                    ResConvBlock(16 + 45, c, c),
+                    ResConvBlock(io_channels + 16 + 45, c, c),
                     ResConvBlock(c, c, c),
                     ResConvBlock(c, c, c),
                     block,
@@ -85,7 +85,7 @@ class DiffusionDecoder(nn.Module):
 
     def forward(self, input, t, logits):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        logits_embed = F.interpolate(self.logits_embed(logits), input.shape[self.io_channels])
+        logits_embed = F.interpolate(self.logits_embed(logits), input.shape[1])
         return self.net(torch.cat([input, timestep_embed, logits_embed], dim=1))
 
 # Define the noise schedule and sampling loop
@@ -160,24 +160,25 @@ class RQDVAE(pl.LightningModule):
 
         self.tau_ramp = ramp(0, 200, math.log(1), math.log(1/16))
 
-        self.encoder = Encoder(global_args.codebook_size, 2)
+        #self.encoder = Encoder(global_args.codebook_size, 2)
+        self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, 2)
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = DiffusionDecoder(global_args.codebook_size, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
 
-        # self.quantizer = ResidualVQ(
-        #     num_quantizers=global_args.num_quantizers,
-        #     dim=128,
-        #     codebook_size=2,
-        #     kmeans_init=True,
-        #     kmeans_iters=100,
-        #     threshold_ema_dead_code=2,
-        #     sample_codebook_temp = 0.1,
-        #     channel_last=False,
-        #     sync_codebook=True
-        # )
-        #self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        self.quantizer = ResidualVQ(
+            num_quantizers=global_args.num_quantizers,
+            dim=global_args.latent_dim,
+            codebook_size=global_args.codebook_size,
+            kmeans_init=True,
+            kmeans_iters=100,
+            threshold_ema_dead_code=2,
+         #   sample_codebook_temp = 0.1,
+            channel_last=False,
+            sync_codebook=True
+        )
+       # self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     def encode(self, *args, **kwargs):
         if self.training:
@@ -208,20 +209,23 @@ class RQDVAE(pl.LightningModule):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            logits = self.encoder(reals).float()
+            tokens = self.encoder(reals).float()
 
-        print(f'logits shape {logits.shape}')
+        print(f'latent shape {tokens.shape}')
         
-        one_hot = F.gumbel_softmax(logits, tau=tau, dim=1)
+        quantized, indices, _ = self.quantizer(tokens)
 
-        print(f'one_hot shape {one_hot.shape}')
+        print(f'quantized shape {quantized.shape}')
+        print(f'indices shape {indices.shape}')
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, one_hot)
+            v = self.diffusion(noised_reals, t, quantized)
             return F.mse_loss(v, targets)
 
     def training_step(self, batch, batch_idx):
 
         tau = math.exp(self.tau_ramp(self.current_epoch + batch_idx))
+
+        print(f'Reals shape {batch[0].shape}')
 
         loss = self.eval_loss(batch[0], tau)
         log_dict = {'train/loss': loss.detach()}
@@ -254,7 +258,7 @@ class DemoCallback(pl.Callback):
 
         noise = torch.randn([32, 3, 128, 128], device=module.device)
         logits = module.encoder_ema(self.demo_reals)
-        one_hot = F.one_hot(logits.argmax(1), 1024).movedim(3, 1).to(logits.dtype)
+        one_hot = F.one_hot(logits.argmax(1), 1024).movedim(2, 1).to(logits.dtype)
         fakes = sample(module.decoder_ema, noise, 1000, 1, one_hot)
 
         try:
@@ -306,9 +310,11 @@ def main():
     p.add_argument('--seed', type=int, default=0,
                    help='the random seed')
     
-    p.add_argument('--codebook-size', type=int, required=True,
+    p.add_argument('--latent-dim', type=int, default=512,
                    help='the validation set')
-    p.add_argument('--num-quantizers', type=int, required=True,
+    p.add_argument('--codebook-size', type=int, default=2,
+                   help='the validation set')
+    p.add_argument('--num-quantizers', type=int, default=14,
                    help='number of quantizers')
 
     # p.add_argument('--val-set', type=str, required=True,
