@@ -197,9 +197,6 @@ class SoundStreamXL(nn.Module):
             kmeans_iters=100, 
             threshold_ema_dead_code=2, 
             channel_last=False,
-            #use_cosine_sim=True,
-            #orthogonal_reg_weight=10,
-            #shared_codebook=True,
             sync_codebook=True
         )
 
