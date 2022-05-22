@@ -30,17 +30,29 @@ class SampleDataset(torch.utils.data.Dataset):
 
     self.sr = global_args.sample_rate
 
+    self.cache_training_data = global_args.cache_training_data
+
+    if self.cache_training_data:
+      self.audio_files = [self.load_file(filename) for filename in self.filenames]
+
+  def load_file(self, filename, sr):
+    audio, sr = torchaudio.load(filename)
+    if sr != self.sr:
+      resample_tf = T.Resample(sr, self.sr)
+      audio = resample_tf(audio)
+    return audio
+
   def __len__(self):
     return len(self.filenames)
 
   def __getitem__(self, idx):
     audio_filename = self.filenames[idx]
     try:
-      audio, sr = torchaudio.load(audio_filename)
-      if sr != self.sr:
-          resample_tf = T.Resample(sr, self.sr)
-          audio = resample_tf(audio)
-          
+      if self.cache_training_data:
+        audio = self.audio_files[idx]
+      else:
+        audio = self.load_file(audio_filename)
+         
       audio = audio.clamp(-1, 1)
 
       #Run file-level augmentations

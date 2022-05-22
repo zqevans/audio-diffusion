@@ -265,12 +265,12 @@ class ExceptionCallback(pl.Callback):
 
 
 class DemoCallback(pl.Callback):
-    def __init__(self, demo_reals, global_args):
+    def __init__(self, demo_dl, global_args):
         super().__init__()
         self.demo_every = global_args.demo_every
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
-        self.demo_reals = demo_reals
+        self.demo_dl = demo_dl
 
     @rank_zero_only
     @torch.no_grad()
@@ -280,9 +280,11 @@ class DemoCallback(pl.Callback):
         if trainer.current_epoch % self.demo_every != 0:
             return
 
-        noise = torch.randn([self.demo_reals.shape[0], 2, self.demo_samples], device=module.device)
+        demo_reals = next(iter(self.demo_dl))[0].to(module.device)
 
-        tokens = module.encoder_ema(self.demo_reals)
+        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples], device=module.device)
+
+        tokens = module.encoder_ema(demo_reals)
 
         #Rearrange for Memcodes
         tokens = rearrange(tokens, 'b d n -> b n d')
@@ -290,8 +292,6 @@ class DemoCallback(pl.Callback):
         quantized, _= module.quantizer(tokens)
         quantized = rearrange(quantized, 'b n d -> b d n')
         fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, quantized)
-
-        
 
         try:
             log_dict = {}
@@ -326,6 +326,8 @@ def main():
                    help='Number of epochs between demos')
     p.add_argument('--demo-steps', type=int, default=500,
                    help='Number of denoising steps for the demos')
+    p.add_argument('--num-demos', type=int, default=8,
+                   help='Number of demos to create')
     p.add_argument('--checkpoint-every', type=int, default=20000,
                    help='Number of steps between checkpoints')
     p.add_argument('--accum-batches', type=int, default=1,
@@ -338,12 +340,14 @@ def main():
     p.add_argument('--seed', type=int, default=0,
                    help='the random seed')
     
-    p.add_argument('--latent-dim', type=int, default=512,
+    p.add_argument('--latent-dim', type=int, default=32,
                    help='the validation set')
-    p.add_argument('--codebook-size', type=int, default=2,
+    p.add_argument('--codebook-size', type=int, default=1024,
                    help='the validation set')
-    p.add_argument('--num-quantizers', type=int, default=14,
+    p.add_argument('--num-quantizers', type=int, default=8,
                    help='number of quantizers')
+    p.add_argument('--cache-training-data', type=bool, default=True,
+                   help='If true, training data is kept in RAM')
 
     # p.add_argument('--val-set', type=str, required=True,
     #                help='the validation set')
@@ -360,12 +364,12 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-
-    demo_reals = next(iter(train_dl))[0].to(device)
+    demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=False)
+    
 
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(demo_reals, args)
+    demo_callback = DemoCallback(demo_dl, args)
     diffusion_model = RQDVAE(args)
     wandb_logger.watch(diffusion_model)
 
