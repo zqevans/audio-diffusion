@@ -14,6 +14,7 @@ from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
+from einops import rearrange
 
 import torchaudio
 import wandb
@@ -22,6 +23,7 @@ from dataset.dataset import SampleDataset
 from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_update
 from encoders.encoders import ResConvBlock, SoundStreamXLEncoder
 from vector_quantize_pytorch import ResidualVQ
+from nwt_pytorch import Memcodes
 
 class Encoder(nn.Sequential):
     def __init__(self, codes, io_channels):
@@ -92,6 +94,16 @@ def get_alphas_sigmas(t):
     noise (sigma), given a timestep."""
     return torch.cos(t * math.pi / 2), torch.sin(t * math.pi / 2)
 
+def get_crash_schedule(t):
+    sigma = torch.sin(t * math.pi / 2) ** 2
+    alpha = (1 - sigma ** 2) ** 0.5
+    return alpha_sigma_to_t(alpha, sigma)
+
+def alpha_sigma_to_t(alpha, sigma):
+    """Returns a timestep, given the scaling factors for the clean image and for
+    the noise."""
+    return torch.atan2(sigma, alpha) / math.pi * 2
+
 @torch.no_grad()
 def sample(model, x, steps, eta, logits):
     """Draws samples from a model given starting noise."""
@@ -99,7 +111,7 @@ def sample(model, x, steps, eta, logits):
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(t)
+    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
 
     # The sampling loop
     for i in trange(steps):
@@ -162,17 +174,25 @@ class RQDVAE(pl.LightningModule):
         self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.ema_decay = global_args.ema_decay
 
-        self.quantizer = ResidualVQ(
-            num_quantizers=global_args.num_quantizers,
+        # self.quantizer = ResidualVQ(
+        #     num_quantizers=global_args.num_quantizers,
+        #     dim=global_args.latent_dim,
+        #     codebook_size=global_args.codebook_size,
+        #     kmeans_init=True,
+        #     kmeans_iters=100,
+        #     threshold_ema_dead_code=2,
+        #  #   sample_codebook_temp = 0.1,
+        #     channel_last=False,
+        #     sync_codebook=True
+        # )
+
+        self.quantizer = Memcodes(
             dim=global_args.latent_dim,
-            codebook_size=global_args.codebook_size,
-            kmeans_init=True,
-            kmeans_iters=100,
-            threshold_ema_dead_code=2,
-         #   sample_codebook_temp = 0.1,
-            channel_last=False,
-            sync_codebook=True
+            heads=global_args.num_quantizers,
+            num_codes=global_args.codebook_size,
+            temperature=1.
         )
        # self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
@@ -189,12 +209,14 @@ class RQDVAE(pl.LightningModule):
     def configure_optimizers(self):
         return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=2e-4)
 
-    def eval_loss(self, reals):
+  
+    def training_step(self, batch, batch_idx):
+        reals = batch[0]
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(t)
+        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
@@ -207,20 +229,33 @@ class RQDVAE(pl.LightningModule):
         with torch.cuda.amp.autocast():
             tokens = self.encoder(reals).float()
 
-        quantized, _, _ = self.quantizer(tokens)
+        #Rearrange for Memcodes
+        tokens = rearrange(tokens, 'b d n -> b n d')
+
+        #Quantize into memcodes
+        quantized, _ = self.quantizer(tokens)
+
+        #
+        quantized = rearrange(quantized, 'b n d -> b d n')
+        # #Sum the commit losses
+        # vq_loss = 0.1 * torch.sum(vq_losses, -1)
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, quantized)
-            return F.mse_loss(v, targets)
+            mse_loss = F.mse_loss(v, targets)
+            loss = mse_loss #+ vq_loss
 
-    def training_step(self, batch, batch_idx):
-        loss = self.eval_loss(batch[0])
-        log_dict = {'train/loss': loss.detach()}
+        log_dict = {
+            'train/loss': loss.detach(),
+            'train/mse_loss': mse_loss.detach(),
+            #'train/vq_loss': vq_loss.detach()
+        }
+
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return loss
 
     def on_before_zero_grad(self, *args, **kwargs):
-        decay = 0.95 if self.current_epoch < 25 else args.ema_decay
+        decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         ema_update(self.diffusion, self.diffusion_ema, decay)
         ema_update(self.encoder, self.encoder_ema, decay)
 
@@ -239,14 +274,24 @@ class DemoCallback(pl.Callback):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
+    def on_train_epoch_end(self, trainer, module):
         last_demo_step = -1
-        if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+        #if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+        if trainer.current_epoch % self.demo_every != 0:
             return
 
         noise = torch.randn([self.demo_reals.shape[0], 2, self.demo_samples], device=module.device)
-        quantized, _, _ = module.quantizer(module.encoder_ema(self.demo_reals))
-        fakes = sample(module.diffusion_ema, noise, 250, 1, quantized)
+
+        tokens = module.encoder_ema(self.demo_reals)
+
+        #Rearrange for Memcodes
+        tokens = rearrange(tokens, 'b d n -> b n d')
+
+        quantized, _= module.quantizer(tokens)
+        quantized = rearrange(quantized, 'b n d -> b d n')
+        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, quantized)
+
+        
 
         try:
             log_dict = {}
@@ -277,15 +322,13 @@ def main():
                    help='The sample rate of the audio')
     p.add_argument('--sample-size', type=int, default=65536,
                    help='Number of samples to train on, must be a multiple of 16384')
-    p.add_argument('--demo-every', type=int, default=1000,
-                   help='Number of steps between demos')
+    p.add_argument('--demo-every', type=int, default=10,
+                   help='Number of epochs between demos')
     p.add_argument('--demo-steps', type=int, default=500,
                    help='Number of denoising steps for the demos')
     p.add_argument('--checkpoint-every', type=int, default=20000,
                    help='Number of steps between checkpoints')
-    p.add_argument('--data-repeats', type=int, default=1,
-                   help='Number of times to repeat the dataset. Useful to lengthen epochs on small datasets')
-    p.add_argument('--accum-batches', type=int, default=8,
+    p.add_argument('--accum-batches', type=int, default=1,
                    help='Batches for gradient accumulation')
     p.add_argument('--batch-size', '-bs', type=int, default=64,
                    help='the batch size')
@@ -324,7 +367,7 @@ def main():
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_reals, args)
     diffusion_model = RQDVAE(args)
-    wandb_logger.watch(diffusion_model.diffusion)
+    wandb_logger.watch(diffusion_model)
 
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
