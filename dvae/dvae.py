@@ -46,15 +46,13 @@ class Encoder(nn.Sequential):
         print(f'Encoder downsample ratio: {self.downsample_ratio}')
 
 class DiffusionDecoder(nn.Module):
-    def __init__(self, codes, io_channels):
+    def __init__(self, latent_dim, io_channels):
         super().__init__()
         c_mults = [128, 128, 256, 256] + [512] * 12
         depth = len(c_mults)
 
         self.io_channels = io_channels
         self.timestep_embed = FourierFeatures(1, 16)
-        self.logits_embed = nn.Conv1d(codes, 45, 1, bias=False)
-
         block = nn.Identity()
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
@@ -73,7 +71,7 @@ class DiffusionDecoder(nn.Module):
                 )
             else:
                 block = nn.Sequential(
-                    ResConvBlock(io_channels + 16 + 45, c, c),
+                    ResConvBlock(io_channels + 16 + latent_dim, c, c),
                     ResConvBlock(c, c, c),
                     ResConvBlock(c, c, c),
                     block,
@@ -83,10 +81,10 @@ class DiffusionDecoder(nn.Module):
                 )
         self.net = block
 
-    def forward(self, input, t, logits):
+    def forward(self, input, t, quantized):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        logits_embed = F.interpolate(self.logits_embed(logits), input.shape[1])
-        return self.net(torch.cat([input, timestep_embed, logits_embed], dim=1))
+        quantized = F.interpolate(quantized, (input.shape[2], ), mode='linear', align_corners=False)
+        return self.net(torch.cat([input, timestep_embed, quantized], dim=1))
 
 # Define the noise schedule and sampling loop
 def get_alphas_sigmas(t):
@@ -158,12 +156,10 @@ class RQDVAE(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
-        self.tau_ramp = ramp(0, 200, math.log(1), math.log(1/16))
-
         #self.encoder = Encoder(global_args.codebook_size, 2)
         self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, 2)
         self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionDecoder(global_args.codebook_size, 2)
+        self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
 
@@ -193,7 +189,7 @@ class RQDVAE(pl.LightningModule):
     def configure_optimizers(self):
         return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=2e-4)
 
-    def eval_loss(self, reals, tau):
+    def eval_loss(self, reals):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
@@ -201,8 +197,8 @@ class RQDVAE(pl.LightningModule):
         alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
-        alphas = alphas[:, None, None, None]
-        sigmas = sigmas[:, None, None, None]
+        alphas = alphas[:, None, None]
+        sigmas = sigmas[:, None, None]
         noise = torch.randn_like(reals)
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
@@ -211,23 +207,14 @@ class RQDVAE(pl.LightningModule):
         with torch.cuda.amp.autocast():
             tokens = self.encoder(reals).float()
 
-        print(f'latent shape {tokens.shape}')
-        
-        quantized, indices, _ = self.quantizer(tokens)
+        quantized, _, _ = self.quantizer(tokens)
 
-        print(f'quantized shape {quantized.shape}')
-        print(f'indices shape {indices.shape}')
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, quantized)
             return F.mse_loss(v, targets)
 
     def training_step(self, batch, batch_idx):
-
-        tau = math.exp(self.tau_ramp(self.current_epoch + batch_idx))
-
-        print(f'Reals shape {batch[0].shape}')
-
-        loss = self.eval_loss(batch[0], tau)
+        loss = self.eval_loss(batch[0])
         log_dict = {'train/loss': loss.detach()}
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return loss
@@ -246,6 +233,7 @@ class DemoCallback(pl.Callback):
     def __init__(self, demo_reals, global_args):
         super().__init__()
         self.demo_every = global_args.demo_every
+        self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.demo_reals = demo_reals
 
@@ -256,17 +244,16 @@ class DemoCallback(pl.Callback):
         if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
             return
 
-        noise = torch.randn([32, 3, 128, 128], device=module.device)
-        logits = module.encoder_ema(self.demo_reals)
-        one_hot = F.one_hot(logits.argmax(1), 1024).movedim(2, 1).to(logits.dtype)
-        fakes = sample(module.decoder_ema, noise, 1000, 1, one_hot)
+        noise = torch.randn([self.demo_reals.shape[0], 2, self.demo_samples], device=module.device)
+        quantized, _, _ = module.quantizer(module.encoder_ema(self.demo_reals))
+        fakes = sample(module.diffusion_ema, noise, 250, 1, quantized)
 
         try:
             log_dict = {}
             for i, fake in enumerate(fakes):
 
                 filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
-                fake = self.ms_encoder(fake).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
                 torchaudio.save(filename, fake, 44100)
                 log_dict[f'demo_{i}'] = wandb.Audio(filename,
                                                     sample_rate=44100,
@@ -281,8 +268,6 @@ def main():
                    help='the training data directory')
     p.add_argument('--name', type=str, required=True,
                    help='the name of the run')
-    p.add_argument('--demo-dir', type=Path, required=True,
-                   help='path to a directory with audio files for demos')
     p.add_argument('--num-workers', type=int, default=2,
                    help='number of CPU workers for the DataLoader')
     p.add_argument('--num-gpus', type=int, default=1,
