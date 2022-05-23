@@ -22,7 +22,6 @@ import wandb
 from dataset.dataset import SampleDataset
 from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_update
 from encoders.encoders import ResConvBlock, SoundStreamXLEncoder
-from vector_quantize_pytorch import ResidualVQ
 from nwt_pytorch import Memcodes
 
 class Encoder(nn.Sequential):
@@ -164,7 +163,7 @@ def ramp(x1, x2, y1, y2):
     return wrapped
 
 
-class RQDVAE(pl.LightningModule):
+class DiffusionDVAE(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
@@ -176,24 +175,13 @@ class RQDVAE(pl.LightningModule):
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
 
-        # self.quantizer = ResidualVQ(
-        #     num_quantizers=global_args.num_quantizers,
-        #     dim=global_args.latent_dim,
-        #     codebook_size=global_args.codebook_size,
-        #     kmeans_init=True,
-        #     kmeans_iters=100,
-        #     threshold_ema_dead_code=2,
-        #  #   sample_codebook_temp = 0.1,
-        #     channel_last=False,
-        #     sync_codebook=True
-        # )
-
         self.quantizer = Memcodes(
             dim=global_args.latent_dim,
             heads=global_args.num_quantizers,
             num_codes=global_args.codebook_size,
             temperature=1.
         )
+
        # self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     def encode(self, *args, **kwargs):
@@ -235,20 +223,16 @@ class RQDVAE(pl.LightningModule):
         #Quantize into memcodes
         quantized, _ = self.quantizer(tokens)
 
-        #
         quantized = rearrange(quantized, 'b n d -> b d n')
-        # #Sum the commit losses
-        # vq_loss = 0.1 * torch.sum(vq_losses, -1)
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, quantized)
             mse_loss = F.mse_loss(v, targets)
-            loss = mse_loss #+ vq_loss
+            loss = mse_loss
 
         log_dict = {
             'train/loss': loss.detach(),
             'train/mse_loss': mse_loss.detach(),
-            #'train/vq_loss': vq_loss.detach()
         }
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
@@ -271,14 +255,17 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.demo_dl = demo_dl
+        self.sample_rate = global_args.sample_rate
 
     @rank_zero_only
     @torch.no_grad()
     def on_train_epoch_end(self, trainer, module):
-        last_demo_step = -1
+        #last_demo_step = -1
         #if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
         if trainer.current_epoch % self.demo_every != 0:
             return
+        
+        #last_demo_step = trainer.global_step
 
         demo_reals = next(iter(self.demo_dl))[0].to(module.device)
 
@@ -293,16 +280,30 @@ class DemoCallback(pl.Callback):
         quantized = rearrange(quantized, 'b n d -> b d n')
         fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, quantized)
 
+        # Put the demos together
+        fakes = rearrange(fakes, 'b d n -> d (b n)')
+        demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
+
+        #demo_audio = torch.cat([demo_reals, fakes], -1)
+
         try:
             log_dict = {}
-            for i, fake in enumerate(fakes):
+            
+            filename = f'recon_{trainer.global_step:08}.wav'
+            fakes = fakes.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            torchaudio.save(filename, fakes, self.sample_rate)
 
-                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
-                fake = fake.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                torchaudio.save(filename, fake, 44100)
-                log_dict[f'demo_{i}'] = wandb.Audio(filename,
-                                                    sample_rate=44100,
-                                                    caption=f'Demo {i}')
+            reals_filename = f'reals_{trainer.global_step:08}.wav'
+            demo_reals = demo_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            torchaudio.save(reals_filename, demo_reals, self.sample_rate)
+
+
+            log_dict[f'recon'] = wandb.Audio(filename,
+                                                sample_rate=self.sample_rate,
+                                                caption=f'Reconstructed')
+            log_dict[f'real'] = wandb.Audio(reals_filename,
+                                                sample_rate=self.sample_rate,
+                                                caption=f'Real')
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
@@ -330,9 +331,9 @@ def main():
                    help='Number of demos to create')
     p.add_argument('--checkpoint-every', type=int, default=20000,
                    help='Number of steps between checkpoints')
-    p.add_argument('--accum-batches', type=int, default=1,
+    p.add_argument('--accum-batches', type=int, default=8,
                    help='Batches for gradient accumulation')
-    p.add_argument('--batch-size', '-bs', type=int, default=64,
+    p.add_argument('--batch-size', '-bs', type=int, default=16,
                    help='the batch size')
 
     p.add_argument('--ema-decay', type=float, default=0.995,
@@ -366,18 +367,25 @@ def main():
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=False)
     
-
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
-    diffusion_model = RQDVAE(args)
+    diffusion_model = DiffusionDVAE(args)
     wandb_logger.watch(diffusion_model)
 
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
         strategy='ddp',
         precision=16,
-        accumulate_grad_batches={0:1, 1:args.accum_batches}, #Start without accumulation
+        accumulate_grad_batches={
+            0:1, 
+            5:2,
+            10:3, 
+            12:4, 
+            14:5, 
+            16:6, 
+            18:7,  
+            20:args.accum_batches}, #Start without accumulation
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,

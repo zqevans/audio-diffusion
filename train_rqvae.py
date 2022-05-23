@@ -47,6 +47,7 @@ class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
         self.demo_every = global_args.demo_every
+        self.sample_rate = global_args.sample_rate
 
     @rank_zero_only
     @torch.no_grad()
@@ -64,9 +65,9 @@ class DemoCallback(pl.Callback):
 
                 filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
                 reconstruction = reconstruction.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                torchaudio.save(filename, reconstruction, 44100)
+                torchaudio.save(filename, reconstruction, self.sample_rate)
                 log_dict[f'demo_{i}'] = wandb.Audio(filename,
-                                                    sample_rate=44100,
+                                                    sample_rate=self.sample_rate,
                                                     caption=f'Demo {i}')
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:

@@ -16,7 +16,7 @@ setup(
         'torchaudio',
         'vector-quantize-pytorch',
         'wandb',
-        'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git#egg=cached_conv'
-        'udls @ git+https://github.com/caillonantoine/UDLS.git#egg=udls',
+        # 'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git#egg=cached_conv'
+        # 'udls @ git+https://github.com/caillonantoine/UDLS.git#egg=udls',
     ],
 )
