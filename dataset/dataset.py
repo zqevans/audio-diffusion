@@ -35,7 +35,7 @@ class SampleDataset(torch.utils.data.Dataset):
     if self.cache_training_data:
       self.audio_files = [self.load_file(filename) for filename in self.filenames]
 
-  def load_file(self, filename, sr):
+  def load_file(self, filename):
     audio, sr = torchaudio.load(filename)
     if sr != self.sr:
       resample_tf = T.Resample(sr, self.sr)

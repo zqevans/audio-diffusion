@@ -132,11 +132,10 @@ class GlobalEncoder(nn.Sequential):
 
 
 class SoundStreamXLEncoder(nn.Module):
-    def __init__(self, n_channels, latent_dim, n_io_channels=1):
+    def __init__(self, n_channels, latent_dim, n_io_channels=1, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16]):
         super().__init__()
         
-        c_mults = [1] + [2, 4, 4, 8, 16]
-        strides =       [2, 2, 4, 5, 8]
+        c_mults = [1] + c_mults
   
         self.depth = len(c_mults)
 

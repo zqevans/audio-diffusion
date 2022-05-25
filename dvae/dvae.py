@@ -21,36 +21,17 @@ import wandb
 
 from dataset.dataset import SampleDataset
 from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_update
+#from diffusion.pqmf import CachedPQMF as PQMF
 from encoders.encoders import ResConvBlock, SoundStreamXLEncoder
 from nwt_pytorch import Memcodes
 
-class Encoder(nn.Sequential):
-    def __init__(self, codes, io_channels):
-        c_in = io_channels
-        c_mults = [64, 64, 128, 128] + [codes] * 10
-        layers = []
-        c_mult_prev = c_in
-        for i, c_mult in enumerate(c_mults):
-            is_last = i == len(c_mults) - 1
-            layers.append(ResConvBlock(c_mult_prev, c_mult, c_mult))
-            layers.append(ResConvBlock(
-                c_mult, c_mult, c_mult, is_last=is_last))
-            if not is_last:
-                layers.append(nn.AvgPool1d(2))
-            else:
-                layers.append(nn.AdaptiveAvgPool1d(1))
-                layers.append(nn.Flatten())
-            c_mult_prev = c_mult
-        super().__init__(*layers)
-
-        self.downsample_ratio = 2**len(c_mults)
-        print(f'Encoder downsample ratio: {self.downsample_ratio}')
-
 class DiffusionDecoder(nn.Module):
-    def __init__(self, latent_dim, io_channels):
+    def __init__(self, latent_dim, io_channels, depth=16):
         super().__init__()
-        c_mults = [128, 128, 256, 256] + [512] * 12
-        depth = len(c_mults)
+        max_depth = 16
+        depth = min(depth, max_depth)
+        c_mults = [256, 256, 512, 512] + [512] * 12
+        c_mults = c_mults[:depth]
 
         self.io_channels = io_channels
         self.timestep_embed = FourierFeatures(1, 16)
@@ -168,7 +149,7 @@ class DiffusionDVAE(pl.LightningModule):
         super().__init__()
 
         #self.encoder = Encoder(global_args.codebook_size, 2)
-        self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, 2)
+        self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, n_io_channels=2, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16])
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
@@ -182,7 +163,10 @@ class DiffusionDVAE(pl.LightningModule):
             temperature=1.
         )
 
-       # self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        # self.pqmf_bands = global_args.pqmf_bands
+
+        # if self.pqmf_bands > 1:
+        #     self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     def encode(self, *args, **kwargs):
         if self.training:
@@ -195,11 +179,17 @@ class DiffusionDVAE(pl.LightningModule):
         return self.diffusion_ema(*args, **kwargs)
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=2e-4)
+        return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=2e-5)
 
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
+
+        encoder_input = reals
+
+        # if self.pqmf_bands > 1:
+        #     encoder_input = self.pqmf(reals)
+        
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
@@ -215,7 +205,7 @@ class DiffusionDVAE(pl.LightningModule):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            tokens = self.encoder(reals).float()
+            tokens = self.encoder(encoder_input).float()
 
         #Rearrange for Memcodes
         tokens = rearrange(tokens, 'b d n -> b n d')
@@ -224,6 +214,9 @@ class DiffusionDVAE(pl.LightningModule):
         quantized, _ = self.quantizer(tokens)
 
         quantized = rearrange(quantized, 'b n d -> b d n')
+
+        # p = torch.rand([reals.shape[0], 1], device=reals.device)
+        # quantized = torch.where(p > 0.2, quantized, torch.zeros_like(quantized))
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, quantized)
@@ -254,8 +247,12 @@ class DemoCallback(pl.Callback):
         self.demo_every = global_args.demo_every
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
-        self.demo_dl = demo_dl
+        self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
+        # self.pqmf_bands = global_args.pqmf_bands
+
+        # if self.pqmf_bands > 1:
+        #     self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
@@ -267,18 +264,32 @@ class DemoCallback(pl.Callback):
         
         #last_demo_step = trainer.global_step
 
-        demo_reals = next(iter(self.demo_dl))[0].to(module.device)
+        demo_reals, _ = next(self.demo_dl)
 
-        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples], device=module.device)
+        encoder_input = demo_reals
+        
+        # if self.pqmf_bands > 1:
+        #     encoder_input = self.pqmf(demo_reals)
+        
+        encoder_input = encoder_input.to(module.device)
 
-        tokens = module.encoder_ema(demo_reals)
+        demo_reals = demo_reals.to(module.device)
+
+        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
+
+        tokens = module.encoder_ema(encoder_input)
 
         #Rearrange for Memcodes
         tokens = rearrange(tokens, 'b d n -> b n d')
 
         quantized, _= module.quantizer(tokens)
         quantized = rearrange(quantized, 'b n d -> b d n')
+
         fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, quantized)
+
+        # # undo the PQMF encoding
+        # if self.pqmf_bands > 1:
+        #     fakes = self.pqmf.inverse(fakes.cpu())
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -331,9 +342,9 @@ def main():
                    help='Number of demos to create')
     p.add_argument('--checkpoint-every', type=int, default=20000,
                    help='Number of steps between checkpoints')
-    p.add_argument('--accum-batches', type=int, default=8,
+    p.add_argument('--accum-batches', type=int, default=2,
                    help='Batches for gradient accumulation')
-    p.add_argument('--batch-size', '-bs', type=int, default=16,
+    p.add_argument('--batch-size', '-bs', type=int, default=8,
                    help='the batch size')
 
     p.add_argument('--ema-decay', type=float, default=0.995,
@@ -347,12 +358,12 @@ def main():
                    help='the validation set')
     p.add_argument('--num-quantizers', type=int, default=8,
                    help='number of quantizers')
-    p.add_argument('--cache-training-data', type=bool, default=True,
+    p.add_argument('--cache-training-data', type=bool, default=False,
                    help='If true, training data is kept in RAM')
 
     # p.add_argument('--val-set', type=str, required=True,
     #                help='the validation set')
-    # p.add_argument('--pqmf-bands', type=int, default=8,
+    # p.add_argument('--pqmf-bands', type=int, default=1,
     #                help='number of sub-bands for the PQMF filter')
 
     args = p.parse_args()
@@ -365,7 +376,7 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=False)
+    demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
@@ -379,13 +390,15 @@ def main():
         precision=16,
         accumulate_grad_batches={
             0:1, 
-            5:2,
-            10:3, 
-            12:4, 
-            14:5, 
-            16:6, 
-            18:7,  
-            20:args.accum_batches}, #Start without accumulation
+            1: args.accum_batches #Start without accumulation
+            # 5:2,
+            # 10:3, 
+            # 12:4, 
+            # 14:5, 
+            # 16:6, 
+            # 18:7,  
+            # 20:8
+            }, 
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
