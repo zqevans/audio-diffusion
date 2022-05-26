@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 
+#import argparse
 import argparse
+import configparser
+import configargparse
+
 from contextlib import contextmanager
 from copy import deepcopy
 import math
 from pathlib import Path
+from ast import literal_eval as Eval
+
 
 import sys
 import torch
@@ -319,63 +325,70 @@ class DemoCallback(pl.Callback):
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
-def main():
-    p = argparse.ArgumentParser()
+
+
+def setup_args(defaults, defaults_text=''):
+    p = argparse.ArgumentParser()  
     p.add_argument('--training-dir', type=Path, required=True,
-                   help='the training data directory')
+                   help='training data directory')
     p.add_argument('--name', type=str, required=True,
-                   help='the name of the run')
-    p.add_argument('--num-workers', type=int, default=2,
-                   help='number of CPU workers for the DataLoader')
-    p.add_argument('--num-gpus', type=int, default=1,
-                   help='number of GPUs to use for training')
+                   help='name of the run')
+    p.add_argument('--wandb-config', required=False,  
+                   help='wandb url to pull config from')
+
+    # add other command-line args using defaults
+    for key, value in defaults.items():
+        help = ""
+        for i in range(len(defaults_text)):  # get the help string
+            if key in defaults_text[i]:
+                help = defaults_text[i-1].replace('# ','')
+        argname = '--'+key.replace('_','-')
+        val = Eval(value)
+        #print(f"{key}:{val} ({type(val)})")
+        p.add_argument(argname, default=val, type=type(val), help=help)
+
+    return p.parse_args()
     
-    p.add_argument('--sample-rate', type=int, default=48000,
-                   help='The sample rate of the audio')
-    p.add_argument('--sample-size', type=int, default=65536,
-                   help='Number of samples to train on, must be a multiple of 16384')
-    p.add_argument('--demo-every', type=int, default=10,
-                   help='Number of epochs between demos')
-    p.add_argument('--demo-steps', type=int, default=500,
-                   help='Number of denoising steps for the demos')
-    p.add_argument('--num-demos', type=int, default=8,
-                   help='Number of demos to create')
-    p.add_argument('--checkpoint-every', type=int, default=20000,
-                   help='Number of steps between checkpoints')
-    p.add_argument('--accum-batches', type=int, default=2,
-                   help='Batches for gradient accumulation')
-    p.add_argument('--batch-size', '-bs', type=int, default=8,
-                   help='the batch size')
 
-    p.add_argument('--ema-decay', type=float, default=0.995,
-                   help='the EMA decay')
-    p.add_argument('--seed', type=int, default=0,
-                   help='the random seed')
-    
-    p.add_argument('--latent-dim', type=int, default=32,
-                   help='the validation set')
-    p.add_argument('--codebook-size', type=int, default=1024,
-                   help='the validation set')
-    p.add_argument('--num-quantizers', type=int, default=8,
-                   help='number of quantizers')
-    p.add_argument('--cache-training-data', type=bool, default=False,
-                   help='If true, training data is kept in RAM')
 
-    # p.add_argument('--val-set', type=str, required=True,
-    #                help='the validation set')
-    # p.add_argument('--pqmf-bands', type=int, default=1,
-    #                help='number of sub-bands for the PQMF filter')
+def main():
 
-    args = p.parse_args()
+    # Config setup. Order of preference will be: 
+    #   1. Default settings are in defaults.ini file
+    #   2. if --wandb-config is not None, Pull from wandb url, full set of parameters to override all defaults
+    #   3. Any other command-line arguments override other settings. cmd line options "win" 
+
+    #   1. Default settings are in defaults.cfg file
+    defaults_file = "defaults.ini"
+    configp = configparser.ConfigParser()
+    configp.read(defaults_file)
+    defaults = dict(configp.items('DEFAULTS'))
+    with open(defaults_file) as f:
+        defaults_text = f.readlines()
+
+    # 2. override defaults with wandb config if url is provided
+    args = setup_args(defaults, defaults_text=defaults_text)
+
+    if args.wandb_config is not None:
+        # TODO: grab config from wandb
+        # wandb_config = stuff
+        # overwrite defaults with wandb config
+        pass
+
+    # 3. Setup command line arguments using default values
+    args = setup_args(defaults)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print('Using device:', device)
     torch.manual_seed(args.seed)
 
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
+    if hasattr(wandb_logger.experiment.config, 'update'):
+        wandb_logger.experiment.config.update(args)
+        wandb_logger.experiment.config.update({"save_config": args}) 
+
     demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     
     exc_callback = ExceptionCallback()
