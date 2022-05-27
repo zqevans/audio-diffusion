@@ -21,9 +21,10 @@ import wandb
 
 from dataset.dataset import SampleDataset
 from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_update
-#from diffusion.pqmf import CachedPQMF as PQMF
-from encoders.encoders import ResConvBlock, SoundStreamXLEncoder
-from nwt_pytorch import Memcodes
+from diffusion.pqmf import CachedPQMF as PQMF
+from encoders.encoders import RAVEEncoder, ResConvBlock, SoundStreamXLEncoder
+
+from residual_memcodes import ResidualMemcodes
 
 class DiffusionDecoder(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -149,24 +150,31 @@ class DiffusionDVAE(pl.LightningModule):
         super().__init__()
 
         #self.encoder = Encoder(global_args.codebook_size, 2)
-        self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, n_io_channels=2, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16])
+        #self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, n_io_channels=2, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16])
+        
+        self.pqmf_bands = global_args.pqmf_bands
+
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+
+        self.encoder = RAVEEncoder(2 * global_args.pqmf_bands, 64, global_args.latent_dim, ratios=[4, 4, 2, 2, 2])
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
 
-        self.quantizer = Memcodes(
+        self.quantizer = ResidualMemcodes(
             dim=global_args.latent_dim,
-            heads=global_args.num_quantizers,
+            heads=global_args.num_heads,
+            num_quantizers=global_args.num_quantizers,
             num_codes=global_args.codebook_size,
             temperature=1.
         )
 
-        # self.pqmf_bands = global_args.pqmf_bands
+        self.quantizer_ema = deepcopy(self.quantizer)
 
-        # if self.pqmf_bands > 1:
-        #     self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        
 
     def encode(self, *args, **kwargs):
         if self.training:
@@ -187,8 +195,8 @@ class DiffusionDVAE(pl.LightningModule):
 
         encoder_input = reals
 
-        # if self.pqmf_bands > 1:
-        #     encoder_input = self.pqmf(reals)
+        if self.pqmf_bands > 1:
+            encoder_input = self.pqmf(reals)
         
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -235,6 +243,7 @@ class DiffusionDVAE(pl.LightningModule):
         decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         ema_update(self.diffusion, self.diffusion_ema, decay)
         ema_update(self.encoder, self.encoder_ema, decay)
+        ema_update(self.quantizer, self.quantizer_ema, decay)
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -249,10 +258,10 @@ class DemoCallback(pl.Callback):
         self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
-        # self.pqmf_bands = global_args.pqmf_bands
+        self.pqmf_bands = global_args.pqmf_bands
 
-        # if self.pqmf_bands > 1:
-        #     self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
@@ -268,8 +277,8 @@ class DemoCallback(pl.Callback):
 
         encoder_input = demo_reals
         
-        # if self.pqmf_bands > 1:
-        #     encoder_input = self.pqmf(demo_reals)
+        if self.pqmf_bands > 1:
+            encoder_input = self.pqmf(demo_reals)
         
         encoder_input = encoder_input.to(module.device)
 
@@ -282,14 +291,10 @@ class DemoCallback(pl.Callback):
         #Rearrange for Memcodes
         tokens = rearrange(tokens, 'b d n -> b n d')
 
-        quantized, _= module.quantizer(tokens)
+        quantized, _= module.quantizer_ema(tokens)
         quantized = rearrange(quantized, 'b n d -> b d n')
 
         fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, quantized)
-
-        # # undo the PQMF encoding
-        # if self.pqmf_bands > 1:
-        #     fakes = self.pqmf.inverse(fakes.cpu())
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -336,11 +341,11 @@ def main():
                    help='Number of samples to train on, must be a multiple of 16384')
     p.add_argument('--demo-every', type=int, default=10,
                    help='Number of epochs between demos')
-    p.add_argument('--demo-steps', type=int, default=500,
+    p.add_argument('--demo-steps', type=int, default=250,
                    help='Number of denoising steps for the demos')
-    p.add_argument('--num-demos', type=int, default=8,
+    p.add_argument('--num-demos', type=int, default=16,
                    help='Number of demos to create')
-    p.add_argument('--checkpoint-every', type=int, default=20000,
+    p.add_argument('--checkpoint-every', type=int, default=10000,
                    help='Number of steps between checkpoints')
     p.add_argument('--accum-batches', type=int, default=2,
                    help='Batches for gradient accumulation')
@@ -354,17 +359,19 @@ def main():
     
     p.add_argument('--latent-dim', type=int, default=32,
                    help='the validation set')
-    p.add_argument('--codebook-size', type=int, default=1024,
+    p.add_argument('--codebook-size', type=int, default=2048,
                    help='the validation set')
-    p.add_argument('--num-quantizers', type=int, default=8,
+    p.add_argument('--num-heads', type=int, default=8,
+                   help='number of heads for the memcodes')
+    p.add_argument('--num-quantizers', type=int, default=1,
                    help='number of quantizers')
     p.add_argument('--cache-training-data', type=bool, default=False,
                    help='If true, training data is kept in RAM')
 
     # p.add_argument('--val-set', type=str, required=True,
     #                help='the validation set')
-    # p.add_argument('--pqmf-bands', type=int, default=1,
-    #                help='number of sub-bands for the PQMF filter')
+    p.add_argument('--pqmf-bands', type=int, default=1,
+                   help='number of sub-bands for the PQMF filter')
 
     args = p.parse_args()
 
