@@ -78,8 +78,8 @@ def setup_args(defaults, defaults_text=''):
     
 
 def pull_wandb_config(wandb_config, defaults):
-    """overwrites parts of args using wandb config info 
-    wandb_config is the url of one of your runs"""
+    """overwrites parts of defaults using wandb config info 
+       wandb_config is the url of one of your runs"""
     api = wandb.Api()  # might get prompted for api key login the first time
     splits = wandb_config.split('/')
     entity, project, run_id = splits[3], splits[4], splits[-1].split('?')[0]
