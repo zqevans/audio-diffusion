@@ -1,5 +1,6 @@
 ## Modified from https://github.com/wesbz/SoundStream/blob/main/net.py
-
+import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -130,6 +131,120 @@ class GlobalEncoder(nn.Sequential):
             c_mult_prev = c_mult
         super().__init__(*layers)
 
+
+def get_padding(kernel_size, dilation=1, mode="centered"):
+    """
+    Computes 'same' padding given a kernel size, stride an dilation.
+
+    Parameters
+    ----------
+
+    kernel_size: int
+        kernel_size of the convolution
+
+    stride: int
+        stride of the convolution
+
+    dilation: int
+        dilation of the convolution
+
+    mode: str
+        either "centered", "causal" or "anticausal"
+    """
+    if kernel_size == 1: return (0, 0)
+    p = (kernel_size - 1) * dilation + 1
+    half_p = p // 2
+    if mode == "centered":
+        p_right = half_p
+        p_left = half_p
+    elif mode == "causal":
+        p_right = 0
+        p_left = 2 * half_p
+    elif mode == "anticausal":
+        p_right = 2 * half_p
+        p_left = 0
+    else:
+        raise Exception(f"Padding mode {mode} is not valid")
+    return (p_left, p_right)
+
+
+class RAVEEncoder(nn.Module):
+
+    def __init__(self,
+                 n_in_channels,
+                 base_feature_channels,
+                 latent_dim,
+                 ratios= [4, 4, 4, 2],
+                 padding_mode="centered",
+                 bias=False):
+        super().__init__()
+        net = [
+            nn.Conv1d(n_in_channels,
+                      base_feature_channels,
+                      7,
+                      padding=get_padding(7, mode=padding_mode)[0],
+                      bias=bias)
+        ]
+
+        # Ratio is used for downsampling stride as well as kernel size
+        for i, r in enumerate(ratios):
+            in_dim = 2**i * base_feature_channels
+            out_dim = 2**(i + 1) * base_feature_channels
+
+            kernel_size = 2 * r + 1
+
+            net.append(nn.BatchNorm1d(in_dim))
+            net.append(nn.LeakyReLU(.2))
+            net.append(
+                nn.Conv1d(
+                    in_dim,
+                    in_dim,
+                    kernel_size,
+                    padding=get_padding(kernel_size, r, mode=padding_mode)[0],
+                    stride=1,
+                    bias=bias,
+                ))
+
+            net.append(nn.BatchNorm1d(in_dim))
+            net.append(nn.LeakyReLU(.2))
+            net.append(
+                nn.Conv1d(
+                    in_dim,
+                    in_dim,
+                    kernel_size,
+                    padding=get_padding(kernel_size, r, mode=padding_mode)[0],
+                    stride=1,
+                    bias=bias,
+                ))
+
+            net.append(nn.BatchNorm1d(in_dim))
+            net.append(nn.LeakyReLU(.2))
+            net.append(
+                nn.Conv1d(
+                    in_dim,
+                    out_dim,
+                    kernel_size,
+                    padding=get_padding(kernel_size, r, mode=padding_mode)[0],
+                    stride=r,
+                    bias=bias,
+                ))
+
+        net.append(nn.LeakyReLU(.2))
+        net.append(
+            nn.Conv1d(
+                out_dim,
+                latent_dim,
+                5,
+                padding=get_padding(5, mode=padding_mode)[0],
+                bias=bias,
+            ))
+
+        self.net = nn.Sequential(*net)
+        downsampling_ratio = (n_in_channels // 2) * np.prod(ratios)
+        print(f'Encoder downsampling ratio: {downsampling_ratio}')
+
+    def forward(self, x):
+        return self.net(x)
 
 class SoundStreamXLEncoder(nn.Module):
     def __init__(self, n_channels, latent_dim, n_io_channels=1, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16]):
