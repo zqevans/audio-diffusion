@@ -1,3 +1,12 @@
+# -*- coding: utf-8 -*-
+__author__ = 'S.H. Hawley'
+
+"""
+Routines for easily keeping track of & archiving run configurations.
+Supports config (.ini) files, pulling previous configs from WandB, 
+and overrides with command-line options.
+"""
+
 from pathlib import Path
 from ast import literal_eval 
 import argparse
