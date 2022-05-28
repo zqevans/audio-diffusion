@@ -198,6 +198,30 @@ class RAVEEncoder(nn.Module):
             net.append(
                 nn.Conv1d(
                     in_dim,
+                    in_dim,
+                    kernel_size,
+                    padding=get_padding(kernel_size, r, mode=padding_mode)[0],
+                    stride=1,
+                    bias=bias,
+                ))
+
+            net.append(nn.BatchNorm1d(in_dim))
+            net.append(nn.LeakyReLU(.2))
+            net.append(
+                nn.Conv1d(
+                    in_dim,
+                    in_dim,
+                    kernel_size,
+                    padding=get_padding(kernel_size, r, mode=padding_mode)[0],
+                    stride=1,
+                    bias=bias,
+                ))
+
+            net.append(nn.BatchNorm1d(in_dim))
+            net.append(nn.LeakyReLU(.2))
+            net.append(
+                nn.Conv1d(
+                    in_dim,
                     out_dim,
                     kernel_size,
                     padding=get_padding(kernel_size, r, mode=padding_mode)[0],

@@ -24,6 +24,7 @@ from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_up
 from diffusion.pqmf import CachedPQMF as PQMF
 from encoders.encoders import RAVEEncoder, ResConvBlock, SoundStreamXLEncoder
 
+from nwt_pytorch import Memcodes
 from residual_memcodes import ResidualMemcodes
 
 class DiffusionDecoder(nn.Module):
@@ -157,22 +158,31 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = RAVEEncoder(2 * global_args.pqmf_bands, 64, global_args.latent_dim, ratios=[4, 4, 2, 2, 2])
+        self.encoder = RAVEEncoder(2 * global_args.pqmf_bands, 64, global_args.latent_dim, ratios=[2, 2, 2, 2, 4, 4])
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
+        
+        self.num_quantizers = global_args.num_quantizers
+        if self.num_quantizers > 0:
+            print(f"Making a quantizer. quantized: {global_args.quantized}")
+            quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
+            
+            quantizer_kwargs = {}
+            if global_args.num_quantizers > 1:
+                quantizer_kwargs["num_quantizers"] = global_args.num_quantizers
 
-        self.quantizer = ResidualMemcodes(
-            dim=global_args.latent_dim,
-            heads=global_args.num_heads,
-            num_quantizers=global_args.num_quantizers,
-            num_codes=global_args.codebook_size,
-            temperature=1.
-        )
+            self.quantizer = quantizer_class(
+                dim=global_args.latent_dim,
+                heads=global_args.num_heads,
+                num_codes=global_args.codebook_size,
+                temperature=1.,
+                **quantizer_kwargs
+            )
 
-        self.quantizer_ema = deepcopy(self.quantizer)
+            self.quantizer_ema = deepcopy(self.quantizer)
 
         
 
@@ -215,19 +225,20 @@ class DiffusionDVAE(pl.LightningModule):
         with torch.cuda.amp.autocast():
             tokens = self.encoder(encoder_input).float()
 
-        #Rearrange for Memcodes
-        tokens = rearrange(tokens, 'b d n -> b n d')
+        if self.num_quantizers > 0:
+            #Rearrange for Memcodes
+            tokens = rearrange(tokens, 'b d n -> b n d')
 
-        #Quantize into memcodes
-        quantized, _ = self.quantizer(tokens)
+            #Quantize into memcodes
+            tokens, _ = self.quantizer(tokens)
 
-        quantized = rearrange(quantized, 'b n d -> b d n')
+            tokens = rearrange(tokens, 'b n d -> b d n')
 
         # p = torch.rand([reals.shape[0], 1], device=reals.device)
         # quantized = torch.where(p > 0.2, quantized, torch.zeros_like(quantized))
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, quantized)
+            v = self.diffusion(noised_reals, t, tokens)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -243,7 +254,9 @@ class DiffusionDVAE(pl.LightningModule):
         decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         ema_update(self.diffusion, self.diffusion_ema, decay)
         ema_update(self.encoder, self.encoder_ema, decay)
-        ema_update(self.quantizer, self.quantizer_ema, decay)
+
+        if self.num_quantizers > 0:
+            ema_update(self.quantizer, self.quantizer_ema, decay)
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -259,6 +272,7 @@ class DemoCallback(pl.Callback):
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
         self.pqmf_bands = global_args.pqmf_bands
+        self.quantized = global_args.num_quantizers > 0
 
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
@@ -288,13 +302,15 @@ class DemoCallback(pl.Callback):
 
         tokens = module.encoder_ema(encoder_input)
 
-        #Rearrange for Memcodes
-        tokens = rearrange(tokens, 'b d n -> b n d')
+        if self.quantized:
 
-        quantized, _= module.quantizer_ema(tokens)
-        quantized = rearrange(quantized, 'b n d -> b d n')
+            #Rearrange for Memcodes
+            tokens = rearrange(tokens, 'b d n -> b n d')
 
-        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, quantized)
+            tokens, _= module.quantizer_ema(tokens)
+            tokens = rearrange(tokens, 'b n d -> b d n')
+
+        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
