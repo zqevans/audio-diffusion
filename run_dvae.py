@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 
-#import argparse
-import argparse
-import configparser
-import configargparse
+from configger.configger import get_all_args, wandb_log_config 
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -326,57 +323,13 @@ class DemoCallback(pl.Callback):
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 
-
-def setup_args(defaults, defaults_text=''):
-    p = argparse.ArgumentParser()  
-    p.add_argument('--training-dir', type=Path, required=True,
-                   help='training data directory')
-    p.add_argument('--name', type=str, required=True,
-                   help='name of the run')
-    p.add_argument('--wandb-config', required=False,  
-                   help='wandb url to pull config from')
-
-    # add other command-line args using defaults
-    for key, value in defaults.items():
-        help = ""
-        for i in range(len(defaults_text)):  # get the help string
-            if key in defaults_text[i]:
-                help = defaults_text[i-1].replace('# ','')
-        argname = '--'+key.replace('_','-')
-        val = Eval(value)
-        #print(f"{key}:{val} ({type(val)})")
-        p.add_argument(argname, default=val, type=type(val), help=help)
-
-    return p.parse_args()
-    
-
-
 def main():
 
     # Config setup. Order of preference will be: 
     #   1. Default settings are in defaults.ini file
-    #   2. if --wandb-config is not None, Pull from wandb url, full set of parameters to override all defaults
-    #   3. Any other command-line arguments override other settings. cmd line options "win" 
-
-    #   1. Default settings are in defaults.cfg file
-    defaults_file = "defaults.ini"
-    configp = configparser.ConfigParser()
-    configp.read(defaults_file)
-    defaults = dict(configp.items('DEFAULTS'))
-    with open(defaults_file) as f:
-        defaults_text = f.readlines()
-
-    # 2. override defaults with wandb config if url is provided
-    args = setup_args(defaults, defaults_text=defaults_text)
-
-    if args.wandb_config is not None:
-        # TODO: grab config from wandb
-        # wandb_config = stuff
-        # overwrite defaults with wandb config
-        pass
-
-    # 3. Setup command line arguments using default values
-    args = setup_args(defaults)
+    #   2. if --wandb-config is given, pull config from wandb to override defaults
+    #   3. Any new command-line arguments override whatever was set earlier
+    args = get_all_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.manual_seed(args.seed)
@@ -385,10 +338,8 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    if hasattr(wandb_logger.experiment.config, 'update'):
-        wandb_logger.experiment.config.update(args)
-        wandb_logger.experiment.config.update({"save_config": args}) 
-
+    wandb_log_config(wandb_logger, args) # push config to wandb for archiving
+ 
     demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     
     exc_callback = ExceptionCallback()
