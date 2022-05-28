@@ -3,6 +3,9 @@ from ast import literal_eval
 import argparse
 import configparser
 import wandb
+import sys
+
+DEFAULTS_FILE = 'defaults.ini'
 
 def arg_eval(value):
     "this just packages some type checking for parsing args"
@@ -12,12 +15,17 @@ def arg_eval(value):
         val = value
     return val
 
-def read_defaults(defaults_file='defaults.ini'):
+
+def read_defaults(defaults_file=DEFAULTS_FILE):
     "read the defaults file, setup defaults dict"
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument('--config-file', required=False, default=defaults_file,
+        help='name of local configuration (.ini) file')
+    config_file = p.parse_known_args()[0].config_file
     configp = configparser.ConfigParser()
-    configp.read(defaults_file)
+    configp.read(config_file)
     defaults = dict(configp.items('DEFAULTS'))
-    with open(defaults_file) as f:
+    with open(config_file) as f:
         defaults_text = f.readlines()
     return defaults, defaults_text
 
@@ -25,13 +33,15 @@ def read_defaults(defaults_file='defaults.ini'):
 def setup_args(defaults, defaults_text=''):
     """combine defaults from .ini file and add parseargs arguments, 
         with help pull from .ini"""
-    p = argparse.ArgumentParser()  
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)  
     p.add_argument('--wandb-config', required=False,  
                    help='wandb url to pull config from')
     p.add_argument('--training-dir', type=Path, required=False,
                    help='training data directory')
     p.add_argument('--name', type=str, required=False,
                    help='name of the run')
+    p.add_argument('--config-file', required=False, default=DEFAULTS_FILE, #added so it appears on -h list
+        help='name of local configuration (.ini) file')
 
     # add other command-line args using defaults
     for key, value in defaults.items():
@@ -51,6 +61,10 @@ def setup_args(defaults, defaults_text=''):
     if (args.name is None) and ('name' in defaults):
         args.name = Path(defaults['name'])
 
+    if None in [args.training_dir, args.name]:
+        print("Required arguments: --training_dir <dir> --name <name>")
+        sys.exit(1)
+        
     return args
     
 
@@ -67,15 +81,18 @@ def pull_wandb_config(wandb_config, defaults):
 
 
 def get_all_args():
-    # Config setup. Order of preference will be: 
-    #   1. Default settings are in defaults.ini file
-    #   2. if --wandb-config is given, pull config from wandb to override defaults
-    #   3. Any new command-line arguments override whatever was set earlier
+    " Config setup."
+    #   1. Default settings are in defaults ini (or some other config) file
     defaults, defaults_text = read_defaults()
-    args = setup_args(defaults, defaults_text=defaults_text)  # 1.
+    args = setup_args(defaults, defaults_text=defaults_text)  
+
+    #   2. if --wandb-config is given, pull config from wandb to override defaults
     if args.wandb_config is not None:
         defaults = pull_wandb_config(args.wandb_config, defaults) # 2.
+
+    #   3. Any new command-line arguments override whatever was set earlier
     args = setup_args(defaults, defaults_text=defaults_text) # 3. this time cmd-line overrides what's there
+
     return args
 
 
