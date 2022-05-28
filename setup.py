@@ -9,6 +9,7 @@ setup(
     install_requires=[
         'auraloss',
         'einops',
+        'fairscale',
         'nwt-pytorch',
         'perceiver-pytorch',
         'pytorch_lightning', 
