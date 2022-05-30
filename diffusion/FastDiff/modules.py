@@ -202,8 +202,10 @@ class TimeAware_LVCBlock(torch.nn.Module):
         batch, in_channels, in_length = x.shape
 
         noise = (self.fc_t(noise_embedding)).unsqueeze(-1)  # (B, 80, 1)
+        
         condition = c + noise  # (B, 80, T)
         kernels, bias = self.kernel_predictor(condition)
+ 
         x = F.leaky_relu(x, 0.2)
         x = self.upsample(x)
 
@@ -233,10 +235,6 @@ class TimeAware_LVCBlock(torch.nn.Module):
         '''
         batch, in_channels, in_length = x.shape
         batch, in_channels, out_channels, kernel_size, kernel_length = kernel.shape
-
-        print(f'in_length: {in_length}')
-        print(f'kernel_length: {kernel_length}')
-        print(f'hop_size: {hop_size}')
 
         assert in_length == (kernel_length * hop_size), "length of (x, kernel) is not matched"
 
@@ -295,6 +293,7 @@ class KernelPredictor(torch.nn.Module):
 
         padding = (kpnet_conv_size - 1) // 2
         self.input_conv = torch.nn.Sequential(
+            torch.nn.Conv1d(cond_channels, cond_channels, kernel_size=2, padding=0),
             torch.nn.Conv1d(cond_channels, kpnet_hidden_channels, 5, padding=(5 - 1) // 2, bias=True),
             getattr(torch.nn, kpnet_nonlinear_activation)(**kpnet_nonlinear_activation_params),
         )
@@ -340,9 +339,9 @@ class KernelPredictor(torch.nn.Module):
                                       self.conv_in_channels,
                                       self.conv_out_channels,
                                       self.conv_kernel_size,
-                                      cond_length)
+                                      cond_length-1)
         bias = b.contiguous().view(batch,
                                    self.conv_layers,
                                    self.conv_out_channels,
-                                   cond_length)
+                                   cond_length-1)
         return kernels, bias

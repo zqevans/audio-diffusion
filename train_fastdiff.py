@@ -42,24 +42,27 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, logits):
+def sample(model, reals, specs, steps, eta):
     """Draws samples from a model given starting noise."""
-    ts = x.new_ones([x.shape[0]])
+    ts = reals.new_ones([reals.shape[0]])
 
     # Create the noise schedule
-    t = torch.linspace(1, 0, steps + 1)[:-1]
+    t = torch.linspace(1, 0, steps + 1)[:-1].to(reals.device)
+    specs = specs.to(reals.device)
     alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
 
     # The sampling loop
     for i in trange(steps):
 
+        t_in = (ts * t[i]).unsqueeze(1).to(reals.device)
+
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], logits).float()
+            v = model((reals, specs, t_in)).float()
 
         # Predict the noise and the denoised image
-        pred = x * alphas[i] - v * sigmas[i]
-        eps = x * sigmas[i] + v * alphas[i]
+        pred = reals * alphas[i] - v * sigmas[i]
+        eps = reals * sigmas[i] + v * alphas[i]
 
         # If we are not on the last timestep, compute the noisy image for the
         # next timestep.
@@ -72,11 +75,11 @@ def sample(model, x, steps, eta, logits):
 
             # Recombine the predicted noise and predicted denoised image in the
             # correct proportions for the next step
-            x = pred * alphas[i + 1] + eps * adjusted_sigma
+            reals = pred * alphas[i + 1] + eps * adjusted_sigma
 
             # Add the correct amount of fresh noise
             if eta:
-                x += torch.randn_like(x) * ddim_sigma
+                reals += torch.randn_like(reals) * ddim_sigma
 
     # If we are on the last timestep, output the denoised image
     return pred
@@ -95,7 +98,7 @@ class FastDiffTrainer(pl.LightningModule):
         self.ema_decay = global_args.ema_decay
 
     def configure_optimizers(self):
-        return optim.Adam([*self.diffusion.parameters()], lr=2e-4)
+        return optim.Adam([*self.diffusion.parameters()], lr=2e-5)
 
   
     def training_step(self, batch, batch_idx):
@@ -117,7 +120,6 @@ class FastDiffTrainer(pl.LightningModule):
         with torch.cuda.amp.autocast():
             v = self.diffusion((noised_reals, specs, t.unsqueeze(1)))
             loss = F.mse_loss(v, targets)
-          
 
         log_dict = {
             'train/loss': loss.detach()
@@ -151,19 +153,19 @@ class DemoCallback(pl.Callback):
         if trainer.current_epoch % self.demo_every != 0:
             return
         
-        demo_reals, _ = next(self.demo_dl)
+        demo_specs, demo_reals, _ = next(self.demo_dl)
 
         demo_reals = demo_reals.to(module.device)
 
         noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
 
-        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1)
+        fakes = sample(module.diffusion, noise, demo_specs, self.demo_steps, 1)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
         demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
 
-        demo_audio = torch.stack([demo_reals, fakes], dim=0)
+        #demo_audio = torch.stack([demo_reals, fakes], dim=0)
 
         try:
             log_dict = {}
@@ -248,7 +250,7 @@ def main():
 
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
-        strategy='ddp',
+        strategy="ddp_find_unused_parameters_false",
         precision=16,
         accumulate_grad_batches={
             0:1, 

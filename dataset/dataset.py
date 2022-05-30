@@ -92,7 +92,7 @@ class SpecDataset(torch.utils.data.Dataset):
 
     self.sr = global_args.sample_rate
 
-    self.to_mel_spec = T.MelSpectrogram(sample_rate=self.sr, n_fft=1024, hop_length=256, n_mels=80, pad_mode='constant')
+    self.to_mel_spec = T.MelSpectrogram(sample_rate=self.sr, n_fft=1024, hop_length=256, n_mels=80)
 
     self.cache_training_data = global_args.cache_training_data
 
@@ -131,7 +131,7 @@ class SpecDataset(torch.utils.data.Dataset):
 
       #Get the mean spectrogram over the dimensions
       spec = torch.mean(spec, 0) #(n_mels, T)
-
+      
       return (spec, audio, audio_filename)
     except Exception as e:
      # print(f'Couldn\'t load file {audio_filename}: {e}')
