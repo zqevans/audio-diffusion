@@ -202,8 +202,6 @@ class TimeAware_LVCBlock(torch.nn.Module):
         batch, in_channels, in_length = x.shape
 
         noise = (self.fc_t(noise_embedding)).unsqueeze(-1)  # (B, 80, 1)
-        print(f'c shape: {c.shape}')
-        print(f'noise shape: {noise.shape}')
         condition = c + noise  # (B, 80, T)
         kernels, bias = self.kernel_predictor(condition)
         x = F.leaky_relu(x, 0.2)
