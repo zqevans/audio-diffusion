@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from prefigure.prefigure import get_all_args, push_wandb_config
 from contextlib import contextmanager
 from copy import deepcopy
 import math
@@ -188,6 +189,8 @@ class DemoCallback(pl.Callback):
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 def main():
+    args = get_all_args()
+    """
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
                    help='the training data directory')
@@ -227,6 +230,7 @@ def main():
     #                help='the validation set')
 
     args = p.parse_args()
+    """
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
@@ -236,6 +240,7 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
+    push_wandb_config(wandb_logger, args, omit=['training_dir'])
     demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     
     exc_callback = ExceptionCallback()
