@@ -19,7 +19,7 @@ from einops import rearrange
 import torchaudio
 import wandb
 
-from dataset.dataset import SpecDataset
+from dataset.dataset import SpecDataset, SongBatchDataset
 
 from diffusion.model import ema_update
 from diffusion.FastDiff.FastDiff_model import FastDiff
@@ -92,13 +92,20 @@ class FastDiffTrainer(pl.LightningModule):
         self.diffusion = FastDiff(
             audio_channels=2,
             cond_channels=80,
+            upsample_ratios=[8, 8, 4],
         )
         
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
 
     def configure_optimizers(self):
-        return optim.Adam([*self.diffusion.parameters()], lr=2e-5)
+        optimizer =  optim.Adam([*self.diffusion.parameters()], lr=5e-4)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": optim.lr_scheduler.CosineAnnealingLR(optimizer, eta_min=1e-6, T_max=2000),
+            },
+        }
 
   
     def training_step(self, batch, batch_idx):
@@ -225,9 +232,6 @@ def main():
     p.add_argument('--cache-training-data', type=bool, default=False,
                    help='If true, training data is kept in RAM')
 
-    # p.add_argument('--val-set', type=str, required=True,
-    #                help='the validation set')
-
     args = p.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -237,6 +241,24 @@ def main():
     train_set = SpecDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+
+
+    # def collate_fn(batch):
+    #     print(len(batch))
+    #     specs = []
+    #     audios = []
+    #     filenames = []
+    #     for song in batch:
+    #         specs = specs + song[0]
+    #         audios = audios + song[1]
+    #         filenames.append(song[2])
+        
+    #     return torch.FloatTensor(audios), torch.FloatTensor(specs), filenames
+
+    # train_set = SongBatchDataset([args.training_dir], 8, args)
+    # train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True, collate_fn=collate_fn,
+    #                            num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+    
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     

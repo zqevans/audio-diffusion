@@ -167,7 +167,6 @@ class DiffusionDVAE(pl.LightningModule):
         
         self.num_quantizers = global_args.num_quantizers
         if self.num_quantizers > 0:
-            print(f"Making a quantizer. quantized: {global_args.quantized}")
             quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
             
             quantizer_kwargs = {}
@@ -235,7 +234,7 @@ class DiffusionDVAE(pl.LightningModule):
             tokens = rearrange(tokens, 'b n d -> b d n')
 
         # p = torch.rand([reals.shape[0], 1], device=reals.device)
-        # quantized = torch.where(p > 0.2, quantized, torch.zeros_like(quantized))
+        # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, tokens)
@@ -409,7 +408,8 @@ def main():
 
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
-        strategy='ddp',
+        accelerator="gpu",
+        strategy='fsdp',
         precision=16,
         accumulate_grad_batches={
             0:1, 
