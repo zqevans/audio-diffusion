@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-import argparse
+#import argparse
+from prefigure.prefigure import get_all_args, push_wandb_config
 from contextlib import contextmanager
 from copy import deepcopy
 import math
@@ -25,7 +26,7 @@ from diffusion.pqmf import CachedPQMF as PQMF
 from encoders.encoders import RAVEEncoder, ResConvBlock, SoundStreamXLEncoder
 
 from nwt_pytorch import Memcodes
-from residual_memcodes import ResidualMemcodes
+from dvae.residual_memcodes import ResidualMemcodes
 
 class DiffusionDecoder(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -167,7 +168,7 @@ class DiffusionDVAE(pl.LightningModule):
         
         self.num_quantizers = global_args.num_quantizers
         if self.num_quantizers > 0:
-            print(f"Making a quantizer. quantized: {global_args.quantized}")
+            print(f"Making a quantizer. quantized: {global_args.num_quantizers}")
             quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
             
             quantizer_kwargs = {}
@@ -341,6 +342,8 @@ class DemoCallback(pl.Callback):
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 def main():
+    args = get_all_args()
+    '''
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
                    help='the training data directory')
@@ -390,6 +393,7 @@ def main():
                    help='number of sub-bands for the PQMF filter')
 
     args = p.parse_args()
+    '''
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
@@ -399,6 +403,7 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
+    push_wandb_config(wandb_logger, args)
     demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     
     exc_callback = ExceptionCallback()

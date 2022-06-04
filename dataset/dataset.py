@@ -3,7 +3,7 @@ import torchaudio
 from torchaudio import transforms as T
 import random
 from glob import glob
-from diffusion.utils import Stereo, PadCrop
+from diffusion.utils import Stereo, PadCrop, PhaseFlipper, NormInputs
 
 class SampleDataset(torch.utils.data.Dataset):
   def __init__(self, paths, global_args):
@@ -12,7 +12,9 @@ class SampleDataset(torch.utils.data.Dataset):
 
     self.augs = torch.nn.Sequential(
       #RandomGain(0.9, 1.0),
-      PadCrop(global_args.sample_size),
+      PadCrop(global_args.sample_size, randomize=global_args.random_crop),
+      PhaseFlipper(),
+      NormInputs(do_norm=global_args.norm_inputs)
     )
 
     self.encoding = torch.nn.Sequential(
@@ -20,12 +22,8 @@ class SampleDataset(torch.utils.data.Dataset):
     )
 
     for path in paths:
-      self.filenames += glob(f'{path}/**/*.wav', recursive=True)
-      self.filenames += glob(f'{path}/**/*.flac', recursive=True)
-      self.filenames += glob(f'{path}/**/*.ogg', recursive=True)
-      self.filenames += glob(f'{path}/**/*.aiff', recursive=True)
-      self.filenames += glob(f'{path}/**/*.aif', recursive=True)
-      self.filenames += glob(f'{path}/**/*.mp3', recursive=True)
+      for ext in ['wav','flac','ogg','aiff','aif','mp3']:
+        self.filenames += glob(f'{path}/**/*.{ext}', recursive=True)
 
     self.sr = global_args.sample_rate
 
@@ -51,7 +49,7 @@ class SampleDataset(torch.utils.data.Dataset):
         audio = self.audio_files[idx]
       else:
         audio = self.load_file(audio_filename)
-         
+
       audio = audio.clamp(-1, 1)
 
       #Run file-level augmentations
@@ -83,12 +81,8 @@ class SpecDataset(torch.utils.data.Dataset):
 
 
     for path in paths:
-      self.filenames += glob(f'{path}/**/*.wav', recursive=True)
-      self.filenames += glob(f'{path}/**/*.flac', recursive=True)
-      self.filenames += glob(f'{path}/**/*.ogg', recursive=True)
-      self.filenames += glob(f'{path}/**/*.aiff', recursive=True)
-      self.filenames += glob(f'{path}/**/*.aif', recursive=True)
-      self.filenames += glob(f'{path}/**/*.mp3', recursive=True)
+      for ext in ['wav','flac','ogg','aiff','aif','mp3']:
+        self.filenames += glob(f'{path}/**/*.{ext}', recursive=True)
 
     self.sr = global_args.sample_rate
 

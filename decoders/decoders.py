@@ -448,8 +448,8 @@ class RAVEGenerator(nn.Module):
         waveform = torch.tanh(waveform.clone()) * mod_sigmoid(loudness)
         print("2 waveform.size() =  ",waveform.size())
 
-        #if add_noise:
-        #    waveform = waveform + noise
+        if add_noise:
+            waveform = waveform + noise
 
         waveform = waveform.clone()[:,:,0:32768] #truncate
 
@@ -459,31 +459,38 @@ class RAVEGenerator(nn.Module):
 def GenBlock(input_channels, output_channels, kernel_size=4, stride=2, padding=1, final_block=False):
     if not final_block:
         return nn.Sequential(
-            nn.ConvTranspose1d(input_channels, output_channels, kernel_size, stride=stride, padding=padding),
+            #nn.ConvTranspose1d(input_channels, output_channels, kernel_size, stride=stride, padding=padding),
+            nn.Upsample(scale_factor=stride),
+            nn.Conv1d(input_channels, output_channels, kernel_size, stride=1, padding=padding),
             nn.BatchNorm1d(output_channels),
-            nn.ReLU()
+            nn.LeakyReLU(0.2)
         )
     else: # Final block
         return nn.Sequential(
-            nn.ConvTranspose1d(input_channels, output_channels, kernel_size, stride=stride, padding=padding),
+            #nn.ConvTranspose1d(input_channels, output_channels, kernel_size, stride=stride, padding=padding),
+            nn.Upsample(scale_factor=stride),
+            nn.Conv1d(input_channels, output_channels, kernel_size, stride=1, padding=padding),
             #nn.Tanh() # save tanh for end of loop, to rescale it
         )
 
 class Upscale_new(nn.Module):
-    def __init__(self, inc, outc, ksize, scale=2, final_block=False, add_noise=True):
+    def __init__(self, inc, outc, ksize, scale=2, final_block=False, add_noise=False):
         super().__init__()
         self.gb = GenBlock(inc, outc, final_block=final_block, stride=scale)
         self.conv_same_size1 = nn.Conv1d(outc,outc,ksize,stride=1,padding=1)
         self.conv_same_size2 = nn.Conv1d(outc,outc,ksize,stride=1,padding=1)
 
         self.add_noise = add_noise
-        self.act = nn.ReLU()
+        self.act = nn.Tanh()
+        #self.bn = nn.BatchNorm1d(outc)
 
     def forward(self, x):
         x = self.gb(x)
         if self.add_noise: # some way of letting the network better match Zach's crazy Splice dataset
             noise = torch.rand_like(x) * 2 - 1
+            # somehow we want the noise to be switched on or off based on what input signal is, but we only have latents x
             morph = self.act(self.conv_same_size1(x * noise))   # let x serve as the switch to allow more or less noise
+            #morph = self.bn(morph) # output looked like it had a positive bias, so let's bn that
             x = self.conv_same_size2(x + morph)  
         return x 
 
@@ -510,7 +517,7 @@ class SimpleDecoder(nn.Module):
     """
     Scott trying Just making a basic expanding thingy
     """
-    def __init__(self, latent_dim, io_channels, out_length=32768, depth=16, add_noise=True):
+    def __init__(self, latent_dim, io_channels, out_length=32768, depth=16, add_noise=False):
         super().__init__()
         channels = [latent_dim,32,16,8,4,4,2]
         scales = [2,2,4,4,2,2]
@@ -518,19 +525,18 @@ class SimpleDecoder(nn.Module):
         assert len(scales) == (len(channels)-1)
         self.out_length = out_length
 
-
-        self.uplayers = nn.ModuleList(
+        self.up_layers = nn.ModuleList(
             [Upscale_new(channels[i],channels[i+1], ksize, scale=scales[i], 
                 final_block=(i==len(scales)-1), add_noise=add_noise) for i in range(len(scales))]
         )
         #self.final_conv = nn.Conv1d(channels[-1],  channels[-1], ksize, stride=1, padding=1)
-        self.final_act = torch.tanh  # so output waveform is on [-1,1]
+        self.final_act = nn.Tanh()  # so output waveform is on [-1,1]
 
     def forward(self, x):
         # initially, x = z = latents. then we upscale it
-        for i in range(len(self.uplayers)):
+        for i in range(len(self.up_layers)):
             #print(f"{i} 1 x.size() = ",x.size())
-            x = self.uplayers[i](x)
+            x = self.up_layers[i](x)
         x = 1.1*self.final_act(x)
         return x[:,:,0:self.out_length] # crop to desired length, throw away the rest
 

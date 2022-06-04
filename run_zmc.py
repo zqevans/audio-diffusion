@@ -80,49 +80,6 @@ def sample(model, inputs):
     return v 
 
 
-'''
-@torch.no_grad()
-def sample_old(model, x, steps, eta, logits):
-    """Draws samples from a model given starting noise."""
-    ts = x.new_ones([x.shape[0]])
-
-    # Create the noise schedule
-    t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
-
-    # The sampling loop
-    for i in trange(steps):
-
-        # Get the model output (v, the predicted velocity)
-        with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], logits).float()
-
-        # Predict the noise and the denoised image
-        pred = x * alphas[i] - v * sigmas[i]
-        eps = x * sigmas[i] + v * alphas[i]
-
-        # If we are not on the last timestep, compute the noisy image for the
-        # next timestep.
-        if i < steps - 1:
-            # If eta > 0, adjust the scaling factor for the predicted noise
-            # downward according to the amount of additional noise to add
-            ddim_sigma = eta * (sigmas[i + 1]**2 / sigmas[i]**2).sqrt() * \
-                (1 - alphas[i]**2 / alphas[i + 1]**2).sqrt()
-            adjusted_sigma = (sigmas[i + 1]**2 - ddim_sigma**2).sqrt()
-
-            # Recombine the predicted noise and predicted denoised image in the
-            # correct proportions for the next step
-            x = pred * alphas[i + 1] + eps * adjusted_sigma
-
-            # Add the correct amount of fresh noise
-            if eta:
-                x += torch.randn_like(x) * ddim_sigma
-
-    # If we are on the last timestep, output the denoised image
-    return pred
-'''
-
-
 class ToMode:
     def __init__(self, mode):
         self.mode = mode
@@ -150,7 +107,7 @@ class ZQVAE(pl.LightningModule):
 
         #self.encoder = Encoder(global_args.codebook_size, 2)
         #self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, n_io_channels=2, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16])
-        self.loudness = Loudness(global_args.sample_rate, 512)
+        #self.loudness = Loudness(global_args.sample_rate, 512)
 
         self.pqmf_bands = global_args.pqmf_bands
 
@@ -172,7 +129,7 @@ class ZQVAE(pl.LightningModule):
         #self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         #self.decoder = RAVEDecoder(global_args.latent_dim, 2)
                 # default RAVE settings pulled from https://github.com/acids-ircam/RAVE/blob/master/train_rave.py
-        DATA_SIZE = 2
+        '''DATA_SIZE = 2
         CAPACITY = 64
         LATENT_SIZE = 128
         BIAS = True
@@ -200,7 +157,7 @@ class ZQVAE(pl.LightningModule):
         #no_latency=False
         #PADDING_MODE =  "causal" if no_latency else "centered"
         PADDING_MODE = "centered"
-        '''self.decoder = RAVEGenerator(global_args.latent_dim,
+        self.decoder = RAVEGenerator(global_args.latent_dim,
             capacity=CAPACITY,
             data_size=DATA_SIZE,
             ratios=RATIOS,
@@ -236,7 +193,6 @@ class ZQVAE(pl.LightningModule):
             )
 
             self.quantizer_ema = deepcopy(self.quantizer)
-            #self.melstft_loss = auraloss.freq.MelSTFTLoss(global_args.sample_rate, device="cuda")
             self.mrstft = auraloss.freq.MultiResolutionSTFTLoss()
 
     def lin_distance(self, x, y):
@@ -316,8 +272,8 @@ class ZQVAE(pl.LightningModule):
 
         with torch.cuda.amp.autocast():
             out_wave = self.decoder(z)
-            mse_loss   = 2 * F.mse_loss(out_wave, targets)
-            mstft_loss = 0.1 * self.mrstft(out_wave, targets)
+            mse_loss   = 2 * F.mse_loss(out_wave, targets) # 2 is just based on experience, to balance the losses
+            mstft_loss = 0.1 * self.mrstft(out_wave, targets) # 0.2 is just based on experience, to balance the losses.
             loss = mse_loss + mstft_loss
 
 
@@ -327,7 +283,7 @@ class ZQVAE(pl.LightningModule):
             'train/mstft_loss': mstft_loss.detach(),
         }
 
-        self.log_dict(log_dict, prog_bar=True, on_step=True)
+        self.log_dict(log_dict, prog_bar=True, on_step=True, sync_dist=True)
         return loss
 
     def on_before_zero_grad(self, *args, **kwargs):
@@ -450,7 +406,8 @@ def main():
 
     trainer = pl.Trainer(
         gpus=torch.cuda.device_count(),
-        strategy='ddp',
+        num_nodes=args.num_nodes,
+        strategy='fsdp',
         precision=16,
         accumulate_grad_batches={
             0:1, 
