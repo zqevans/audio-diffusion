@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse
+from prefigure.prefigure import get_all_args, push_wandb_config
 from contextlib import contextmanager
 from copy import deepcopy
 import math
@@ -340,6 +340,7 @@ class DemoCallback(pl.Callback):
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 def main():
+    '''
     p = argparse.ArgumentParser()
     p.add_argument('--training-dir', type=Path, required=True,
                    help='the training data directory')
@@ -389,6 +390,8 @@ def main():
                    help='number of sub-bands for the PQMF filter')
 
     args = p.parse_args()
+    '''
+    args = get_all_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
@@ -405,11 +408,12 @@ def main():
     demo_callback = DemoCallback(demo_dl, args)
     diffusion_model = DiffusionDVAE(args)
     wandb_logger.watch(diffusion_model)
+    push_wandb_config(wandb_logger, args)
 
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        strategy='fsdp',
+        strategy='ddp',
         precision=16,
         accumulate_grad_batches={
             0:1, 
