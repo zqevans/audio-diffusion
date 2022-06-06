@@ -21,6 +21,8 @@ import torchaudio
 from fairscale.nn import checkpoint_wrapper, auto_wrap, wrap
 
 import wandb
+import numpy as np
+import pandas as pd
 
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
@@ -30,6 +32,7 @@ from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
 from decoders.diffusion_decoder import DiffusionDecoder
 from diffusion.model import ema_update
+from viz.viz import embeddings_table, pca_point_cloud
 
 # Define the noise schedule and sampling loop
 def get_alphas_sigmas(t):
@@ -87,24 +90,6 @@ def sample(model, x, steps, eta, logits):
     # If we are on the last timestep, output the denoised image
     return pred
 
-
-class ToMode:
-    def __init__(self, mode):
-        self.mode = mode
-
-    def __call__(self, image):
-        return image.convert(self.mode)
-
-
-def ramp(x1, x2, y1, y2):
-    def wrapped(x):
-        if x <= x1:
-            return y1
-        if x >= x2:
-            return y2
-        fac = (x - x1) / (x2 - x1)
-        return y1 * (1 - fac) + y2 * fac
-    return wrapped
 
 
 class DiffusionDVAE(pl.LightningModule):
@@ -296,6 +281,11 @@ class DemoCallback(pl.Callback):
             log_dict[f'real'] = wandb.Audio(reals_filename,
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
+
+            log_dict[f'embeddings'] = embeddings_table(tokens)
+
+            log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
+
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
@@ -312,7 +302,7 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
+    demo_dl = data.DataLoader(train_set, args.num_demos, num_workers=args.num_workers, shuffle=True)
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
