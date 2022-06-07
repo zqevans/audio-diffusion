@@ -23,7 +23,8 @@ class FastDiff(nn.Module):
                  diffusion_step_embed_dim_in=128,
                  diffusion_step_embed_dim_mid=512,
                  diffusion_step_embed_dim_out=512,
-                 use_weight_norm=True):
+                 use_weight_norm=True,
+                 cond_hop_length = 1):
         super().__init__()
 
         self.diffusion_step_embed_dim_in = diffusion_step_embed_dim_in
@@ -42,8 +43,7 @@ class FastDiff(nn.Module):
         # the layer-specific fc for noise scale embedding
         self.fc_t1 = nn.Linear(diffusion_step_embed_dim_in, diffusion_step_embed_dim_mid)
         self.fc_t2 = nn.Linear(diffusion_step_embed_dim_mid, diffusion_step_embed_dim_out)
-
-        cond_hop_length = 1
+        
         for n in range(self.lvc_block_nums):
             cond_hop_length = cond_hop_length * upsample_ratios[n]
             lvcb = TimeAware_LVCBlock(

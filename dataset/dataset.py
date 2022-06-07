@@ -130,7 +130,7 @@ class SpecDataset(torch.utils.data.Dataset):
       if self.encoding is not None:
         audio = self.encoding(audio)
 
-      spec = torch.log(self.to_mel_spec(audio)) #(C, n_mels, T)
+      spec = self.to_mel_spec(audio) #(C, n_mels, T)
 
       #Get the mean spectrogram over the dimensions
       spec = torch.mean(spec, 0) #(n_mels, T)
