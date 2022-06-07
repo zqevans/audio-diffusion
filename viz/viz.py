@@ -53,12 +53,11 @@ def pca_point_cloud(tokens):
     points = []
     cmap = cm.tab20  # 20 farly distinct colors
     norm = Normalize(vmin=0, vmax=data.shape[0])
-    for b in range(data.shape[0]):
-        #color = b 
-        [r, g, b, _] = [int(255*x) for x in cmap(norm(b))]
+    for bi in range(data.shape[0]):  # batch index
+        [r, g, b, _] = [int(255*x) for x in cmap(norm(bi))]
         for n in range(data.shape[1]):
             #points.append([data[b,n,0], data[b,n,1], data[b,n,2], color]) # only works for color=1 to 14
-            points.append([data[b,n,0], data[b,n,1], data[b,n,2], r, g, b])
+            points.append([data[bi,n,0], data[bi,n,1], data[bi,n,2], r, g, b])
 
     point_cloud = np.array(points)
     return wandb.Object3D(point_cloud)
