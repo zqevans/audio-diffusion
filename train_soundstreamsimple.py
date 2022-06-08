@@ -44,8 +44,8 @@ class SoundStreamModule(pl.LightningModule):
         n_io_channels = 2
         n_feature_channels = 8
         self.num_quantizers = global_args.num_quantizers
-        self.unwrapped = True  # use single monolithic model or broken into parts?
-        self.use_memcodes = True  # only used when unwrapped==True
+        self.unwrapped = False  # use single monolithic model or broken into parts?
+        self.use_memcodes = True # only effects if unwrapped=True  Don't use ResidualVQ, which seems to break PyL stuff. Instead use memcodes for quantizer 
 
         if not self.unwrapped:
             self.model = SoundStreamXL(n_io_channels, n_feature_channels, global_args.latent_dim, 
@@ -85,7 +85,7 @@ class SoundStreamModule(pl.LightningModule):
 
         self.mstft = MultiResolutionSTFTLoss()
         self.pwcl = PerceptuallyWeightedComplexLoss()
-        #self.mrpwcl = MultiResolutionPrcptWghtdCmplxLoss()
+        self.mrpwcl = MultiResolutionPrcptWghtdCmplxLoss()
 
     def configure_optimizers(self):
         if not self.unwrapped:
@@ -101,7 +101,7 @@ class SoundStreamModule(pl.LightningModule):
 
         encoder_input = reals
 
-        with torch.cuda.amp.autocast(): # can't get autocast to work so...
+        with torch.cuda.amp.autocast(): 
             if not self.unwrapped:
                 preds, indices, cb_losses = self.model(encoder_input)  # cb_losses are codebook losses
             else:
@@ -119,19 +119,19 @@ class SoundStreamModule(pl.LightningModule):
             targets = reals  # autoencoder     
             preds = preds[:,:,0:targets.size()[-1]] # preds come out padded
             mse_loss   = 10 * F.mse_loss(preds, targets) # mult factor based on experience, to balance the losses
-            mstft_loss = 0.1 * self.mstft(preds, targets) 
-            pwc_loss = self.pwcl(preds, targets)
-            mrpwc_loss = 0 #self.mrpwcl(preds,targets)
+            mstft_loss = 0 # 0.1 * self.mstft(preds, targets) 
+            pwc_loss =  0 # self.pwcl(preds, targets)
+            mrpwc_loss = self.mrpwcl(preds,targets)
             cb_loss = 1e4 * cb_losses.sum()
             loss = mse_loss + mstft_loss + cb_loss + pwc_loss + mrpwc_loss
 
         log_dict = {
             'train/loss': loss.detach(),
             'train/mse_loss': mse_loss.detach(),
-            'train/mstft_loss': mstft_loss.detach(),
+            #'train/mstft_loss': mstft_loss.detach(),
             'train/cb_loss': cb_loss.detach(),
-            'train/pwc_loss': pwc_loss.detach(),
-            #'train/mrpwc_loss': mrpwc_loss.detach(),
+            #'train/pwc_loss': pwc_loss.detach(),
+            'train/mrpwc_loss': mrpwc_loss.detach(),
         }
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
@@ -166,15 +166,21 @@ class DemoCallback(pl.Callback):
  
         if trainer.current_epoch % self.demo_every != 0:
             return
+            
+        print("\nStarting demo generation...")
         
         demo_reals, _ = next(self.demo_dl)
         encoder_input = demo_reals 
         encoder_input = encoder_input.to(module.device)
         demo_reals = demo_reals.to(module.device)
 
+        module.model.eval()
         if not module.unwrapped:
+            #encoder_input = encoder_input.half()  # do this or it breaks multi gpu
+            module.model.to(encoder_input.dtype)
             fakes, indices, cb_losses = module.model(encoder_input)
         else:
+            encoder_input = encoder_input.half() 
             encoded = module.encoder(encoder_input)
             if not module.use_memcodes:
                 quantized, indices, cb_losses = self.quantizer(encoded)
@@ -214,6 +220,9 @@ class DemoCallback(pl.Callback):
 
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
+        module.model.train()
+        return
+
 
 def main():
 
