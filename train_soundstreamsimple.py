@@ -15,6 +15,8 @@ from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.strategies import DDPStrategy
+from pytorch_lightning.plugins import DDPPlugin
+
 from einops import rearrange
 
 import torchaudio
@@ -25,7 +27,9 @@ import numpy as np
 import pandas as pd
 
 from dataset.dataset import SampleDataset
-from encoders.encoders import SoundStreamXL
+from encoders.encoders import SoundStreamXL, SoundStreamXLEncoder, SoundStreamXLDecoder
+from vector_quantize_pytorch import ResidualVQ
+
 from auraloss.freq import MultiResolutionSTFTLoss
 from viz.viz import embeddings_table, pca_point_cloud
 
@@ -37,23 +41,54 @@ class SoundStreamModule(pl.LightningModule):
         n_io_channels = 2
         n_feature_channels = 8
         self.num_quantizers = global_args.num_quantizers
-        self.model = SoundStreamXL(n_io_channels, n_feature_channels, global_args.latent_dim, 
-            n_quantizers=global_args.num_quantizers, codebook_size=global_args.codebook_size)
+
+        self.unwrapped = False  # use single monolithic model or broken into parts?
+
+        if not self.unwrapped:
+            self.model = SoundStreamXL(n_io_channels, n_feature_channels, global_args.latent_dim, 
+                n_quantizers=global_args.num_quantizers, codebook_size=global_args.codebook_size)
+        else:
+            self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=global_args.latent_dim)  
+            self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=global_args.latent_dim)
+
+            self.quantizer = ResidualVQ(
+                num_quantizers=self.num_quantizers, 
+                dim=global_args.latent_dim, 
+                codebook_size=global_args.codebook_size,
+                kmeans_init=True, 
+                kmeans_iters=100, 
+                threshold_ema_dead_code=2, 
+                channel_last=False,
+                sync_codebook=True
+            )
 
         self.mrstft = MultiResolutionSTFTLoss()
 
     def configure_optimizers(self):
-        return optim.Adam([*self.model.parameters()], lr=2e-5)
+        if not self.unwrapped:
+            return optim.Adam([*self.model.parameters()], lr=2e-5)
+        else:
+            params = [*self.encoder.parameters(), *self.decoder.parameters()]
+            if self.num_quantizers > 0:
+                params += [*self.quantizer.parameters()]
+            return optim.Adam(params, lr=2e-5)
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]  # grab actual audio part of batch, not the filenames
 
         encoder_input = reals
 
-        with torch.cuda.amp.autocast():
-            preds, indices, cb_loss = self.model(encoder_input)  # cb_loss is codebook loss
-            mse_loss   = 2 * F.mse_loss(preds, targets) # 2 is just based on experience, to balance the losses
-            mstft_loss = 0.1 * self.mrstft(preds, targets) # 0.2 is just based on experience, to balance the losses.
+        if True: # with torch.cuda.amp.autocast(): # can't get autocast to work so...
+            if not self.unwrapped:
+                preds, indices, cb_losses = self.model(encoder_input)  # cb_losses are codebook losses
+            else:
+                assert False, "TODO: You forgot to add the code here"
+
+            targets = reals  # autoencoder     
+            preds = preds[:,:,0:targets.size()[-1]] # preds come out padded
+            mse_loss   = 10 * F.mse_loss(preds, targets) # mult factor based on experience, to balance the losses
+            mstft_loss = 0.1 * self.mrstft(preds, targets) # mult factor based on experience, to balance the losses.
+            cb_loss = 1e4 * cb_losses.sum()
             loss = mse_loss + mstft_loss + cb_loss
 
         log_dict = {
@@ -96,14 +131,20 @@ class DemoCallback(pl.Callback):
             return
         
         demo_reals, _ = next(self.demo_dl)
+        encoder_input = demo_reals 
+        encoder_input = encoder_input.to(module.device)
+        demo_reals = demo_reals.to(module.device)
 
-        encoder_input = demo_reals
-        if self.pqmf_bands > 1:
-            encoder_input = self.pqmf(demo_reals)
+        if not module.unwrapped:
+            fakes, indices, cb_losses = module.model(encoder_input)
+        else:
+            assert False, "TODO: You forgot to add the code here"
 
-        fakes, indices, ss_losses = self.model(encoder_input)
+        # Put the demos together
+        fakes = rearrange(fakes, 'b d n -> d (b n)')
+        demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
 
-        try:
+        try: # loggins
             log_dict = {}
 
             filename = f'recon_{trainer.global_step:08}.wav'
@@ -122,7 +163,6 @@ class DemoCallback(pl.Callback):
                                                 caption=f'Real')
 
             #log_dict[f'embeddings'] = embeddings_table(tokens)
-
             #log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
 
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
@@ -147,17 +187,16 @@ def main():
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
-    #diffusion_model = DiffusionDVAE(args)
-    model = SoundStreamModule(args)
-    wandb_logger.watch(model)
+    module = SoundStreamModule(args)
+    wandb_logger.watch(module)
     push_wandb_config(wandb_logger, args)
 
     trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        #strategy='fsdp',
-        strategy='ddp',
-        precision=16,
+        #strategy='ddp', # this worked for DVAE, but not soundstream. ....?
+        strategy = DDPStrategy(find_unused_parameters=False), #without this I get lots of warnings and it goes slow
+        #precision=16,
         accumulate_grad_batches={
             0:1, 
             1: args.accum_batches #Start without accumulation
@@ -175,7 +214,7 @@ def main():
         max_epochs=10000000,
     )
 
-    trainer.fit(model, train_dl)
+    trainer.fit(module, train_dl)
 
 if __name__ == '__main__':
     main()
