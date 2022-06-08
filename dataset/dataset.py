@@ -3,7 +3,7 @@ import torchaudio
 from torchaudio import transforms as T
 import random
 from glob import glob
-from diffusion.utils import Stereo, PadCrop, PhaseFlipper, NormInputs
+from diffusion.utils import RandPool, Stereo, PadCrop, PhaseFlipper, NormInputs, FillTheNoise, OneMinus, RandPool
 
 class SampleDataset(torch.utils.data.Dataset):
   def __init__(self, paths, global_args):
@@ -13,8 +13,12 @@ class SampleDataset(torch.utils.data.Dataset):
     self.augs = torch.nn.Sequential(
       #RandomGain(0.9, 1.0),
       PadCrop(global_args.sample_size, randomize=global_args.random_crop),
+      NormInputs(do_norm=global_args.norm_inputs),
+      OneMinus(), # this is crazy, reverse the signal rel. to +/-1
+      #RandPool(),
+      FillTheNoise(),
       PhaseFlipper(),
-      NormInputs(do_norm=global_args.norm_inputs)
+      NormInputs(do_norm=global_args.norm_inputs),
     )
 
     self.encoding = torch.nn.Sequential(

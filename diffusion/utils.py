@@ -23,8 +23,41 @@ class PadCrop(nn.Module):
 
 class PhaseFlipper(nn.Module):
     "she was PHAAAAAAA-AAAASE FLIPPER, a random invert yeah"
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.p = p
     def __call__(self, signal):
-        return -signal if (random.random() < 0.5) else signal
+        return -signal if (random.random() < self.p) else signal
+
+
+class FillTheNoise(nn.Module):
+    "randomly adds a bit of noise, just to spice things up"
+    def __init__(self, p=0.33):
+        super().__init__()
+        self.p = p
+    def __call__(self, signal):
+        return signal + 0.25*random.random()*(2*torch.rand_like(signal)-1) if (random.random() < self.p) else signal
+
+
+class OneMinus(nn.Module):
+    "aka Destructo: subtracts the signal from +/- 1, just to spice things up"
+    def __init__(self, p=0.2):
+        super().__init__()
+        self.p = p
+    def __call__(self, signal):
+        return 0.9*torch.sign(signal) - signal if (random.random() < self.p) else signal
+
+class RandPool(nn.Module):
+    def __init__(self, p=0.2):
+        self.p, self.maxkern = p, 100
+    def __call__(self, signal):
+        if (random.random() < self.p):
+            ksize = int(random.random()*self.maxkern)
+            avger = nn.AvgPool1d(kernel_size=ksize, stride=1, padding=1)
+            return avger(signal)
+        else:
+            return signal
+        
 
 class NormInputs(nn.Module):
     "useful for quiet inputs. intended to be part of augmentation chain; not activated by default"
