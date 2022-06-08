@@ -29,8 +29,11 @@ import pandas as pd
 from dataset.dataset import SampleDataset
 from encoders.encoders import SoundStreamXL, SoundStreamXLEncoder, SoundStreamXLDecoder
 from vector_quantize_pytorch import ResidualVQ
+from dvae.residual_memcodes import ResidualMemcodes
 
-from auraloss.freq import MultiResolutionSTFTLoss
+# lonewater's auraloss fork:  pip install --no-cache-dir -U git+https://github.com/lonewater/auraloss.git@PWCmplxDif
+from auraloss.freq import MultiResolutionSTFTLoss, PerceptuallyWeightedComplexLoss, MultiResolutionPrcptWghtdCmplxLoss
+
 from viz.viz import embeddings_table, pca_point_cloud
 
 
@@ -41,8 +44,8 @@ class SoundStreamModule(pl.LightningModule):
         n_io_channels = 2
         n_feature_channels = 8
         self.num_quantizers = global_args.num_quantizers
-
-        self.unwrapped = False  # use single monolithic model or broken into parts?
+        self.unwrapped = True  # use single monolithic model or broken into parts?
+        self.use_memcodes = True  # only used when unwrapped==True
 
         if not self.unwrapped:
             self.model = SoundStreamXL(n_io_channels, n_feature_channels, global_args.latent_dim, 
@@ -51,18 +54,38 @@ class SoundStreamModule(pl.LightningModule):
             self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=global_args.latent_dim)  
             self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=global_args.latent_dim)
 
-            self.quantizer = ResidualVQ(
-                num_quantizers=self.num_quantizers, 
-                dim=global_args.latent_dim, 
-                codebook_size=global_args.codebook_size,
-                kmeans_init=True, 
-                kmeans_iters=100, 
-                threshold_ema_dead_code=2, 
-                channel_last=False,
-                sync_codebook=True
-            )
+            self.quantizer = None
+            if not self.use_memcodes:
+                self.quantizer = ResidualVQ(
+                    num_quantizers=self.num_quantizers, 
+                    dim=global_args.latent_dim, 
+                    codebook_size=global_args.codebook_size,
+                    kmeans_init=True, 
+                    kmeans_iters=100, 
+                    threshold_ema_dead_code=2, 
+                    channel_last=False,
+                    sync_codebook=True
+                )
+            else: # memcodes
+                self.num_quantizers = global_args.num_quantizers
+                if self.num_quantizers > 0:
+                    quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
+                    
+                    quantizer_kwargs = {}
+                    if global_args.num_quantizers > 1:
+                        quantizer_kwargs["num_quantizers"] = global_args.num_quantizers
 
-        self.mrstft = MultiResolutionSTFTLoss()
+                    self.quantizer = quantizer_class(
+                        dim=global_args.latent_dim,
+                        heads=global_args.num_heads,
+                        num_codes=global_args.codebook_size,
+                        temperature=1.,
+                        **quantizer_kwargs
+                    )
+
+        self.mstft = MultiResolutionSTFTLoss()
+        self.pwcl = PerceptuallyWeightedComplexLoss()
+        #self.mrpwcl = MultiResolutionPrcptWghtdCmplxLoss()
 
     def configure_optimizers(self):
         if not self.unwrapped:
@@ -78,31 +101,45 @@ class SoundStreamModule(pl.LightningModule):
 
         encoder_input = reals
 
-        if True: # with torch.cuda.amp.autocast(): # can't get autocast to work so...
+        with torch.cuda.amp.autocast(): # can't get autocast to work so...
             if not self.unwrapped:
                 preds, indices, cb_losses = self.model(encoder_input)  # cb_losses are codebook losses
             else:
-                assert False, "TODO: You forgot to add the code here"
+                encoded = self.encoder(encoder_input)
+                if not self.use_memcodes:
+                    quantized, indices, cb_losses = self.quantizer(encoded)
+                else:
+                    encoded = rearrange(encoded, 'b d n -> b n d')
+                    quantized, _= self.quantizer(encoded)
+                    quantized = rearrange(quantized, 'b n d -> b d n')
+                    indices, cb_losses = None, torch.zeros(2)  # so i don't have to write more ifs below
+
+                preds = self.decoder(quantized)
 
             targets = reals  # autoencoder     
             preds = preds[:,:,0:targets.size()[-1]] # preds come out padded
             mse_loss   = 10 * F.mse_loss(preds, targets) # mult factor based on experience, to balance the losses
-            mstft_loss = 0.1 * self.mrstft(preds, targets) # mult factor based on experience, to balance the losses.
+            mstft_loss = 0.1 * self.mstft(preds, targets) 
+            pwc_loss = self.pwcl(preds, targets)
+            mrpwc_loss = 0 #self.mrpwcl(preds,targets)
             cb_loss = 1e4 * cb_losses.sum()
-            loss = mse_loss + mstft_loss + cb_loss
+            loss = mse_loss + mstft_loss + cb_loss + pwc_loss + mrpwc_loss
 
         log_dict = {
             'train/loss': loss.detach(),
             'train/mse_loss': mse_loss.detach(),
             'train/mstft_loss': mstft_loss.detach(),
             'train/cb_loss': cb_loss.detach(),
+            'train/pwc_loss': pwc_loss.detach(),
+            #'train/mrpwc_loss': mrpwc_loss.detach(),
         }
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return loss
 
     def on_before_zero_grad(self, *args, **kwargs):
-        decay = 0.95 if self.current_epoch < 25 else self.ema_decay
+        pass
+        #decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         #ema_update(self.diffusion, self.diffusion_ema, decay)
         #ema_update(self.encoder, self.encoder_ema, decay)
 
@@ -138,7 +175,15 @@ class DemoCallback(pl.Callback):
         if not module.unwrapped:
             fakes, indices, cb_losses = module.model(encoder_input)
         else:
-            assert False, "TODO: You forgot to add the code here"
+            encoded = module.encoder(encoder_input)
+            if not module.use_memcodes:
+                quantized, indices, cb_losses = self.quantizer(encoded)
+            else:
+                encoded = rearrange(encoded, 'b d n -> b n d')
+                quantized, _= module.quantizer(encoded)
+                quantized = rearrange(quantized, 'b n d -> b d n')
+                indices, cb_losses = None, torch.zeros(2)  # so i don't have to write more ifs below
+            fakes = module.decoder(quantized)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -195,8 +240,8 @@ def main():
         gpus=args.num_gpus,
         accelerator="gpu",
         #strategy='ddp', # this worked for DVAE, but not soundstream. ....?
-        strategy = DDPStrategy(find_unused_parameters=False), #without this I get lots of warnings and it goes slow
-        #precision=16,
+        strategy = 'ddp_find_unused_parameters_false', #without this I get lots of warnings and it goes slow
+        precision=16,
         accumulate_grad_batches={
             0:1, 
             1: args.accum_batches #Start without accumulation
