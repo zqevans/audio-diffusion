@@ -30,8 +30,18 @@ from dataset.dataset import SampleDataset
 from encoders.encoders import SoundStreamXL, SoundStreamXLEncoder, SoundStreamXLDecoder
 from vector_quantize_pytorch import ResidualVQ
 from dvae.residual_memcodes import ResidualMemcodes
+from decoders.diffusion_decoder import DiffusionDecoder
 from diffusion.model import ema_update
 
+from icebox.tagbox_utils import audio_for_jbx, load_audio_for_jbx
+from jukebox.make_models import make_vqvae, make_prior, MODELS, make_model
+from jukebox.hparams import Hyperparams, setup_hparams
+#from jukebox.sample import sample_single_window, _sample, sample_partial_window, upsample
+from jukebox.utils.dist_utils import setup_dist_from_mpi
+#from jukebox.utils.torch_utils import empty_cache
+
+
+rank, local_rank, device = setup_dist_from_mpi()
 
 # lonewater's auraloss fork:  pip install --no-cache-dir -U git+https://github.com/lonewater/auraloss.git@PWCmplxDif
 from auraloss.freq import MultiResolutionSTFTLoss, PerceptuallyWeightedComplexLoss, MultiResolutionPrcptWghtdCmplxLoss
@@ -39,105 +49,156 @@ from auraloss.freq import MultiResolutionSTFTLoss, PerceptuallyWeightedComplexLo
 from viz.viz import embeddings_table, pca_point_cloud
 
 
-class SoundStreamModule(pl.LightningModule):
+# Define the noise schedule and sampling loop
+def get_alphas_sigmas(t):
+    """Returns the scaling factors for the clean image (alpha) and for the
+    noise (sigma), given a timestep."""
+    return torch.cos(t * math.pi / 2), torch.sin(t * math.pi / 2)
+
+def get_crash_schedule(t):
+    sigma = torch.sin(t * math.pi / 2) ** 2
+    alpha = (1 - sigma ** 2) ** 0.5
+    return alpha_sigma_to_t(alpha, sigma)
+
+def alpha_sigma_to_t(alpha, sigma):
+    """Returns a timestep, given the scaling factors for the clean image and for
+    the noise."""
+    return torch.atan2(sigma, alpha) / math.pi * 2
+
+@torch.no_grad()
+def sample(model, x, steps, eta, logits):
+    """Draws samples from a model given starting noise."""
+    ts = x.new_ones([x.shape[0]])
+
+    # Create the noise schedule
+    t = torch.linspace(1, 0, steps + 1)[:-1]
+
+    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+
+    # The sampling loop
+    for i in trange(steps):
+
+        # Get the model output (v, the predicted velocity)
+        with torch.cuda.amp.autocast():
+            v = model(x, ts * t[i], logits).float()
+
+        # Predict the noise and the denoised image
+        pred = x * alphas[i] - v * sigmas[i]
+        eps = x * sigmas[i] + v * alphas[i]
+
+        # If we are not on the last timestep, compute the noisy image for the
+        # next timestep.
+
+        if i < steps - 1:
+
+            # If eta > 0, adjust the scaling factor for the predicted noise
+            # downward according to the amount of additional noise to add
+            ddim_sigma = eta * (sigmas[i + 1]**2 / sigmas[i]**2).sqrt() * \
+                (1 - alphas[i]**2 / alphas[i + 1]**2).sqrt()
+            adjusted_sigma = (sigmas[i + 1]**2 - ddim_sigma**2).sqrt()
+
+            # Recombine the predicted noise and predicted denoised image in the
+            # correct proportions for the next step
+            x = pred * alphas[i + 1] + eps * adjusted_sigma
+
+            # Add the correct amount of fresh noise
+            if eta:
+                x += torch.randn_like(x) * ddim_sigma
+
+    # If we are on the last timestep, output the denoised image
+    return pred
+
+
+class IceBoxModule(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
         n_io_channels = 2
         n_feature_channels = 8
         self.num_quantizers = global_args.num_quantizers
-        self.unwrapped = False  # use single monolithic model or broken into parts?
-        self.use_memcodes = True # only effects if unwrapped=True  Don't use ResidualVQ, which seems to break PyL stuff. Instead use memcodes for quantizer 
         self.ema_decay = global_args.ema_decay
 
-        if not self.unwrapped:
-            self.model = SoundStreamXL(n_io_channels, n_feature_channels, global_args.latent_dim, 
-                n_quantizers=global_args.num_quantizers, codebook_size=global_args.codebook_size)
-            self.model_ema = deepcopy(self.model)
+        self.hps = Hyperparams()
+        assert global_args.sample_rate == 44100, "Jukebox was pretrained at 44100 Hz."
+        self.hps.sr = global_args.sample_rate #44100
+        self.hps.levels = 3
+        self.hps.hop_fraction = [.5,.5,.125]
 
-        else:
-            self.encoder = SoundStreamXLEncoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=global_args.latent_dim)  
-            self.decoder = SoundStreamXLDecoder(n_io_channels=n_io_channels, n_channels=n_feature_channels, latent_dim=global_args.latent_dim)
+        vqvae = "vqvae"
+        self.vqvae = make_vqvae(setup_hparams(vqvae, dict(sample_length = 1048576)), self.device)
+        for param in self.vqvae.parameters():  # FREEZE IT
+            param.requires_grad = False
 
-            self.quantizer = None
-            if not self.use_memcodes:
-                self.quantizer = ResidualVQ(
-                    num_quantizers=self.num_quantizers, 
-                    dim=global_args.latent_dim, 
-                    codebook_size=global_args.codebook_size,
-                    kmeans_init=True, 
-                    kmeans_iters=100, 
-                    threshold_ema_dead_code=2, 
-                    channel_last=False,
-                    sync_codebook=True
-                )
-            else: # memcodes
-                self.num_quantizers = global_args.num_quantizers
-                if self.num_quantizers > 0:
-                    quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
-                    
-                    quantizer_kwargs = {}
-                    if global_args.num_quantizers > 1:
-                        quantizer_kwargs["num_quantizers"] = global_args.num_quantizers
+        self.encoder = self.vqvae.encode
+        self.encoder_ema = deepcopy(self.encoder)
 
-                    self.quantizer = quantizer_class(
-                        dim=global_args.latent_dim,
-                        heads=global_args.num_heads,
-                        num_codes=global_args.codebook_size,
-                        temperature=1.,
-                        **quantizer_kwargs
-                    )
-            self.quantizer_ema = deepcopy(self.quantizer)
+        latent_dim = 64 # global_args.latent_dim. Jukebox is 64
+        io_channels = 2#1 # 2.  Jukebox is mono but we decode in stereo
+        self.diffusion = DiffusionDecoder(latent_dim, io_channels)
+        self.diffusion_ema = deepcopy(self.diffusion)
+        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.ema_decay = global_args.ema_decay
+ 
+        self.num_quantizers = 0 # turn off all quantizer stuff from train_dvae.py for now 
+        self.quantized = False 
 
+
+        # losses
         self.mstft = MultiResolutionSTFTLoss()
         self.pwcl = PerceptuallyWeightedComplexLoss()
         self.mrpwcl = MultiResolutionPrcptWghtdCmplxLoss()
 
-    def configure_optimizers(self):
-        if not self.unwrapped:
-            return optim.Adam([*self.model.parameters()], lr=2e-5)
-        else:
-            params = [*self.encoder.parameters(), *self.decoder.parameters()]
-            if self.num_quantizers > 0:
-                params += [*self.quantizer.parameters()]
-            return optim.Adam(params, lr=2e-5)
+    def configure_optimizers(self): # only decoderf
+        return optim.Adam([*self.diffusion.parameters()], lr=2e-5)
+
+    def encode(self, *args, **kwargs):
+        if self.training:
+            return self.encoder(*args, **kwargs)
+        return self.encoder_ema(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        if self.training:
+            return self.diffusion(*args, **kwargs)
+        return self.diffusion_ema(*args, **kwargs)
+
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]  # grab actual audio part of batch, not the filenames
 
-        encoder_input = reals
+        #print("reals.size() = ",reals.size())
+        reals_mono = reals[:,0,:] # mono only, sorry
+        #print("reals_mono.size() = ",reals_mono.size())
 
-        with torch.cuda.amp.autocast(): 
-            if not self.unwrapped:
-                preds, indices, cb_losses = self.model(encoder_input)  # cb_losses are codebook losses
-            else:
-                encoded = self.encoder(encoder_input)
-                if not self.use_memcodes:
-                    quantized, indices, cb_losses = self.quantizer(encoded)
-                else:
-                    encoded = rearrange(encoded, 'b d n -> b n d')
-                    quantized, _= self.quantizer(encoded)
-                    quantized = rearrange(quantized, 'b n d -> b d n')
-                    indices, cb_losses = None, torch.zeros(2)  # so i don't have to write more ifs below
+        encoder_input = audio_for_jbx(reals_mono, device=reals.device)
 
-                preds = self.decoder(quantized)
+        # Draw uniformly distributed continuous timesteps
+        t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
-            targets = reals  # autoencoder     
-            preds = preds[:,:,0:targets.size()[-1]] # preds come out padded
-            mse_loss   =  10 * F.mse_loss(preds, targets) # mult factor based on experience, to balance the losses
-            mstft_loss =  0.1 * self.mstft(preds, targets) 
-            pwc_loss =  0 # self.pwcl(preds, targets)
-            mrpwc_loss = 0 # self.mrpwcl(preds,targets)
-            cb_loss = 1e4 * cb_losses.sum()
-            loss = mse_loss + mstft_loss + cb_loss + pwc_loss + mrpwc_loss
+        # Calculate the noise schedule parameters for those timesteps
+        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+
+        # Combine the ground truth images and the noise
+        alphas = alphas[:, None, None]
+        sigmas = sigmas[:, None, None]
+        noise = torch.randn_like(reals)
+        noised_reals = reals * alphas + noise * sigmas
+        targets = noise * alphas - reals * sigmas
+
+        # Compute the model output and the loss.
+        with torch.cuda.amp.autocast():
+            zs = self.encoder(encoder_input) # indices at 3 resolutions
+            xs = self.vqvae.bottleneck.decode(zs) # vectors vectors at 3 resolutions
+            tokens = self.package_3layer_tokens(xs).float() # combine resolutions
+
+
+        with torch.cuda.amp.autocast():
+            v = self.diffusion(noised_reals, t, tokens)
+            mse_loss = F.mse_loss(v, targets)
+            loss = mse_loss
 
         log_dict = {
             'train/loss': loss.detach(),
             'train/mse_loss': mse_loss.detach(),
-            'train/mstft_loss': mstft_loss.detach(),
-            'train/cb_loss': cb_loss.detach(),
-            #'train/pwc_loss': pwc_loss.detach(),
-            #'train/mrpwc_loss': mrpwc_loss.detach(),
         }
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
@@ -145,8 +206,15 @@ class SoundStreamModule(pl.LightningModule):
 
     def on_before_zero_grad(self, *args, **kwargs):
         decay = 0.95 if self.current_epoch < 25 else self.ema_decay
-        ema_update(self.model, self.model_ema, decay)
-        #ema_update(self.encoder, self.encoder_ema, decay)
+        ema_update(self.diffusion, self.diffusion_ema, decay)
+        #ema_update(self.encoder, self.encoder_ema, decay) # frozen
+
+        if self.num_quantizers > 0:
+            ema_update(self.quantizer, self.quantizer_ema, decay)
+
+    def package_3layer_tokens(self, tokens_list):
+        "jukebox vqvae returns a list of 3 1-dim tensor. Here we package them...somehow"
+        return tokens_list[1] # TODO: just grab one set of tokens for now
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -161,37 +229,35 @@ class DemoCallback(pl.Callback):
         self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
+        self.pqmf_bands = global_args.pqmf_bands
+        self.quantized = global_args.num_quantizers > 0
 
     @rank_zero_only
     @torch.no_grad()
     def on_train_epoch_end(self, trainer, module):
- 
         if trainer.current_epoch % self.demo_every != 0:
             return
-
-        #print("\nStarting demo generation...")
         
+        print("\nStarting demo")
+
         demo_reals, _ = next(self.demo_dl)
-        encoder_input = demo_reals 
+
+        demo_reals_mono = demo_reals[:,0,:]
+        encoder_input = audio_for_jbx(demo_reals_mono)
         encoder_input = encoder_input.to(module.device)
+
         demo_reals = demo_reals.to(module.device)
 
-        module.model.eval()
-        if not module.unwrapped:
-            #encoder_input = encoder_input.half()  # do this or it breaks multi gpu
-            module.model.to(encoder_input.dtype)
-            fakes, indices, cb_losses = module.model(encoder_input)
-        else:
-            encoder_input = encoder_input.half() 
-            encoded = module.encoder(encoder_input)
-            if not module.use_memcodes:
-                quantized, indices, cb_losses = self.quantizer(encoded)
-            else:
-                encoded = rearrange(encoded, 'b d n -> b n d')
-                quantized, _= module.quantizer(encoded)
-                quantized = rearrange(quantized, 'b n d -> b d n')
-                indices, cb_losses = None, torch.zeros(2)  # so i don't have to write more ifs below
-            fakes = module.decoder(quantized)
+        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
+
+        #tokens = module.encoder_ema(encoder_input)
+        # Compute the model output and the loss.
+        zs = module.encoder(encoder_input) # indices at 3 resolutions
+        xs = module.vqvae.bottleneck.decode(zs) # vectors vectors at 3 resolutions
+        tokens = module.package_3layer_tokens(xs).float() # combine resolutions
+
+
+        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -244,14 +310,14 @@ def main():
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
-    module = SoundStreamModule(args)
+    module = IceBoxModule(args)
     wandb_logger.watch(module)
     push_wandb_config(wandb_logger, args)
 
     trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        strategy='ddp', # this worked for DVAE, but not soundstream. ....?
+        strategy='ddp', 
         #strategy = 'ddp_find_unused_parameters_false', #without this I get lots of warnings and it goes slow
         precision=32,
         accumulate_grad_batches={
