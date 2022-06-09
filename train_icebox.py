@@ -41,7 +41,6 @@ from jukebox.utils.dist_utils import setup_dist_from_mpi
 #from jukebox.utils.torch_utils import empty_cache
 
 
-rank, local_rank, device = setup_dist_from_mpi()
 
 # lonewater's auraloss fork:  pip install --no-cache-dir -U git+https://github.com/lonewater/auraloss.git@PWCmplxDif
 from auraloss.freq import MultiResolutionSTFTLoss, PerceptuallyWeightedComplexLoss, MultiResolutionPrcptWghtdCmplxLoss
@@ -118,6 +117,8 @@ class IceBoxModule(pl.LightningModule):
         self.num_quantizers = global_args.num_quantizers
         self.ema_decay = global_args.ema_decay
 
+        rank, local_rank, device = setup_dist_from_mpi()
+        #rank, local_rank, device = self.local_rank, self.local_rank, self.device #TODO only works on 1 pod
         self.hps = Hyperparams()
         assert global_args.sample_rate == 44100, "Jukebox was pretrained at 44100 Hz."
         self.hps.sr = global_args.sample_rate #44100
@@ -289,7 +290,6 @@ class DemoCallback(pl.Callback):
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
-        module.model.train()
         return
 
 
