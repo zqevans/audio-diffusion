@@ -143,6 +143,8 @@ class IceBoxModule(pl.LightningModule):
         self.num_quantizers = 0 # turn off all quantizer stuff from train_dvae.py for now 
         self.quantized = False 
 
+        self.jukebox_layers = [global_args.jukebox_layer]
+
 
         # losses
         self.mstft = MultiResolutionSTFTLoss()
@@ -215,7 +217,8 @@ class IceBoxModule(pl.LightningModule):
 
     def package_3layer_tokens(self, tokens_list):
         "jukebox vqvae returns a list of 3 1-dim tensor. Here we package them...somehow"
-        return tokens_list[1] # TODO: just grab one set of tokens for now
+        ind = self.jukebox_layers[0]
+        return tokens_list[ind] # TODO: just grab one set of tokens for now
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -317,7 +320,7 @@ def main():
     trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        strategy='ddp', 
+        #strategy='ddp', 
         #strategy = 'ddp_find_unused_parameters_false', #without this I get lots of warnings and it goes slow
         precision=32,
         accumulate_grad_batches={

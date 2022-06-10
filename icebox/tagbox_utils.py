@@ -43,7 +43,7 @@ def audio_for_jbx(audio, trunc_sec=None, device=None):
 
 
 
-def load_audio_for_jbx(path, offset=0.0, dur=None, trunc_sec=None, device='cuda'):
+def load_audio_for_jbx(path, offset=0.0, dur=None, trunc_sec=None, device=None):
     """Loads a path for use with Jukebox."""
     audio, sr = librosa.load(path, sr=None, offset=offset, duration=dur)
 
