@@ -235,7 +235,7 @@ class TimeAware_LVCBlock(torch.nn.Module):
         '''
         batch, in_channels, in_length = x.shape
         batch, in_channels, out_channels, kernel_size, kernel_length = kernel.shape
-
+        
         assert in_length == (kernel_length * hop_size), "length of (x, kernel) is not matched"
 
         padding = dilation * int((kernel_size - 1) / 2)

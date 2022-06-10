@@ -96,9 +96,6 @@ class DiffusionDVAE(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
-        #self.encoder = Encoder(global_args.codebook_size, 2)
-        #self.encoder = SoundStreamXLEncoder(32, global_args.latent_dim, n_io_channels=2, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16])
-        
         self.pqmf_bands = global_args.pqmf_bands
 
         if self.pqmf_bands > 1:
@@ -314,7 +311,6 @@ def main():
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        #strategy='fsdp',
         strategy='ddp',
         precision=16,
         accumulate_grad_batches={
