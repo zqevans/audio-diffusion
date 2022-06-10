@@ -8,17 +8,65 @@ def get_alphas_sigmas(t):
     return torch.cos(t * math.pi / 2), torch.sin(t * math.pi / 2)
 
 class PadCrop(nn.Module):
-    def __init__(self, n_samples):
+    def __init__(self, n_samples, randomize=False):
         super().__init__()
         self.n_samples = n_samples
+        self.randomize = randomize
 
     def __call__(self, signal):
         n, s = signal.shape
-        start = torch.randint(0, max(0, s - self.n_samples) + 1, []).item()
+        start = 0 if (not self.randomize) else torch.randint(0, max(0, s - self.n_samples) + 1, []).item()
         end = start + self.n_samples
         output = signal.new_zeros([n, self.n_samples])
         output[:, :min(s, self.n_samples)] = signal[:, start:end]
         return output
+
+class PhaseFlipper(nn.Module):
+    "she was PHAAAAAAA-AAAASE FLIPPER, a random invert yeah"
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.p = p
+    def __call__(self, signal):
+        return -signal if (random.random() < self.p) else signal
+
+
+class FillTheNoise(nn.Module):
+    "randomly adds a bit of noise, just to spice things up"
+    def __init__(self, p=0.33):
+        super().__init__()
+        self.p = p
+    def __call__(self, signal):
+        return signal + 0.25*random.random()*(2*torch.rand_like(signal)-1) if (random.random() < self.p) else signal
+
+
+class OneMinus(nn.Module):
+    "aka Destructo: subtracts the signal from +/- 1, just to spice things up"
+    def __init__(self, p=0.2):
+        super().__init__()
+        self.p = p
+    def __call__(self, signal):
+        return 0.9*torch.sign(signal) - signal if (random.random() < self.p) else signal
+
+class RandPool(nn.Module):
+    def __init__(self, p=0.2):
+        self.p, self.maxkern = p, 100
+    def __call__(self, signal):
+        if (random.random() < self.p):
+            ksize = int(random.random()*self.maxkern)
+            avger = nn.AvgPool1d(kernel_size=ksize, stride=1, padding=1)
+            return avger(signal)
+        else:
+            return signal
+        
+
+class NormInputs(nn.Module):
+    "useful for quiet inputs. intended to be part of augmentation chain; not activated by default"
+    def __init__(self, do_norm=False):
+        super().__init__()
+        self.do_norm = do_norm
+        self.eps = 1e-2
+    def __call__(self, signal):
+        return signal if (not self.do_norm) else signal/(torch.amax(signal,-1)[0] + self.eps)
 
 class Mono(nn.Module):
   def __call__(self, signal):

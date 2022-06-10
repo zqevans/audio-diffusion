@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import argparse
+from prefigure.prefigure import get_all_args, push_wandb_config
 from contextlib import contextmanager
 from copy import deepcopy
 import math
@@ -14,61 +14,25 @@ from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.strategies import DDPStrategy
 from einops import rearrange
 
 import torchaudio
+from fairscale.nn import checkpoint_wrapper, auto_wrap, wrap
+
 import wandb
+import numpy as np
+import pandas as pd
 
 from dataset.dataset import SampleDataset
-from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, ema_update
 from diffusion.pqmf import CachedPQMF as PQMF
 from encoders.encoders import RAVEEncoder, ResConvBlock, SoundStreamXLEncoder
 
 from nwt_pytorch import Memcodes
-from residual_memcodes import ResidualMemcodes
-
-class DiffusionDecoder(nn.Module):
-    def __init__(self, latent_dim, io_channels, depth=16):
-        super().__init__()
-        max_depth = 16
-        depth = min(depth, max_depth)
-        c_mults = [256, 256, 512, 512] + [512] * 12
-        c_mults = c_mults[:depth]
-
-        self.io_channels = io_channels
-        self.timestep_embed = FourierFeatures(1, 16)
-        block = nn.Identity()
-        for i in range(depth, 0, -1):
-            c = c_mults[i - 1]
-            if i > 1:
-                c_prev = c_mults[i - 2]
-                block = SkipBlock(
-                    nn.AvgPool1d(2),
-                    ResConvBlock(c_prev, c, c),
-                    ResConvBlock(c, c, c),
-                    ResConvBlock(c, c, c),
-                    block,
-                    ResConvBlock(c * 2 if i != depth else c, c, c),
-                    ResConvBlock(c, c, c),
-                    ResConvBlock(c, c, c_prev),
-                    nn.Upsample(scale_factor=2, mode='linear', align_corners=False),
-                )
-            else:
-                block = nn.Sequential(
-                    ResConvBlock(io_channels + 16 + latent_dim, c, c),
-                    ResConvBlock(c, c, c),
-                    ResConvBlock(c, c, c),
-                    block,
-                    ResConvBlock(c * 2, c, c),
-                    ResConvBlock(c, c, c),
-                    ResConvBlock(c, c, io_channels, is_last=True),
-                )
-        self.net = block
-
-    def forward(self, input, t, quantized):
-        timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        quantized = F.interpolate(quantized, (input.shape[2], ), mode='linear', align_corners=False)
-        return self.net(torch.cat([input, timestep_embed, quantized], dim=1))
+from dvae.residual_memcodes import ResidualMemcodes
+from decoders.diffusion_decoder import DiffusionDecoder
+from diffusion.model import ema_update
+from viz.viz import embeddings_table, pca_point_cloud
 
 # Define the noise schedule and sampling loop
 def get_alphas_sigmas(t):
@@ -126,24 +90,6 @@ def sample(model, x, steps, eta, logits):
     # If we are on the last timestep, output the denoised image
     return pred
 
-
-class ToMode:
-    def __init__(self, mode):
-        self.mode = mode
-
-    def __call__(self, image):
-        return image.convert(self.mode)
-
-
-def ramp(x1, x2, y1, y2):
-    def wrapped(x):
-        if x <= x1:
-            return y1
-        if x >= x2:
-            return y2
-        fac = (x - x1) / (x2 - x1)
-        return y1 * (1 - fac) + y2 * fac
-    return wrapped
 
 
 class DiffusionDVAE(pl.LightningModule):
@@ -332,60 +278,18 @@ class DemoCallback(pl.Callback):
             log_dict[f'real'] = wandb.Audio(reals_filename,
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
+
+            log_dict[f'embeddings'] = embeddings_table(tokens)
+
+            log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
+
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('--training-dir', type=Path, required=True,
-                   help='the training data directory')
-    p.add_argument('--name', type=str, required=True,
-                   help='the name of the run')
-    p.add_argument('--num-workers', type=int, default=2,
-                   help='number of CPU workers for the DataLoader')
-    p.add_argument('--num-gpus', type=int, default=1,
-                   help='number of GPUs to use for training')
-    
-    p.add_argument('--sample-rate', type=int, default=48000,
-                   help='The sample rate of the audio')
-    p.add_argument('--sample-size', type=int, default=65536,
-                   help='Number of samples to train on, must be a multiple of 16384')
-    p.add_argument('--demo-every', type=int, default=10,
-                   help='Number of epochs between demos')
-    p.add_argument('--demo-steps', type=int, default=250,
-                   help='Number of denoising steps for the demos')
-    p.add_argument('--num-demos', type=int, default=16,
-                   help='Number of demos to create')
-    p.add_argument('--checkpoint-every', type=int, default=10000,
-                   help='Number of steps between checkpoints')
-    p.add_argument('--accum-batches', type=int, default=2,
-                   help='Batches for gradient accumulation')
-    p.add_argument('--batch-size', '-bs', type=int, default=8,
-                   help='the batch size')
 
-    p.add_argument('--ema-decay', type=float, default=0.995,
-                   help='the EMA decay')
-    p.add_argument('--seed', type=int, default=0,
-                   help='the random seed')
-    
-    p.add_argument('--latent-dim', type=int, default=32,
-                   help='the validation set')
-    p.add_argument('--codebook-size', type=int, default=2048,
-                   help='the validation set')
-    p.add_argument('--num-heads', type=int, default=8,
-                   help='number of heads for the memcodes')
-    p.add_argument('--num-quantizers', type=int, default=1,
-                   help='number of quantizers')
-    p.add_argument('--cache-training-data', type=bool, default=False,
-                   help='If true, training data is kept in RAM')
-
-    # p.add_argument('--val-set', type=str, required=True,
-    #                help='the validation set')
-    p.add_argument('--pqmf-bands', type=int, default=1,
-                   help='number of sub-bands for the PQMF filter')
-
-    args = p.parse_args()
+    args = get_all_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
@@ -395,17 +299,19 @@ def main():
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
+    demo_dl = data.DataLoader(train_set, args.num_demos, num_workers=args.num_workers, shuffle=True)
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
     diffusion_model = DiffusionDVAE(args)
     wandb_logger.watch(diffusion_model)
+    push_wandb_config(wandb_logger, args)
 
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
-        strategy="ddp",
+        accelerator="gpu",
+        strategy='ddp',
         precision=16,
         accumulate_grad_batches={
             0:1, 
