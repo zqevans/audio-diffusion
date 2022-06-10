@@ -1,5 +1,6 @@
 auraloss
 einops
+fairscale
 nwt-pytorch
 perceiver-pytorch
 pytorch_lightning

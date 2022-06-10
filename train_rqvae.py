@@ -16,10 +16,12 @@ from torchaudio import transforms as T
 import torch.nn as nn
 import wandb
 
+from prefigure.prefigure import get_all_args, push_wandb_config
+
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from diffusion.utils import PadCrop
-
+from einops import rearrange
 from encoders.learner import SoundStreamXLLearner
 
 # Define utility functions
@@ -44,31 +46,46 @@ def eval_mode(model):
 
 
 class DemoCallback(pl.Callback):
-    def __init__(self, global_args):
+    def __init__(self, demo_dl, global_args):
         super().__init__()
         self.demo_every = global_args.demo_every
         self.sample_rate = global_args.sample_rate
+        self.demo_dl = iter(demo_dl)
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
-        last_demo_step = -1
-        print(batch.shape)
-        if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+    def on_train_epoch_end(self, trainer, module, outputs, batch, batch_idx, unused=0):
+        if trainer.current_epoch % self.demo_every != 0:
             return
+        
+        demo_reals, _ = next(self.demo_dl)
 
-        last_demo_step = trainer.global_step
+        demo_reals = demo_reals.to(module.device)
+
+        fakes = module.soundstream(demo_reals)
+
+        # Put the demos together
+        fakes = rearrange(fakes, 'b d n -> d (b n)')
+        demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
 
         try:
             log_dict = {}
-            for i, reconstruction in enumerate(batch):
+            
+            filename = f'recon_{trainer.global_step:08}.wav'
+            fakes = fakes.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            torchaudio.save(filename, fakes, self.sample_rate)
 
-                filename = f'demo_{trainer.global_step:08}_{i:02}.wav'
-                reconstruction = reconstruction.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                torchaudio.save(filename, reconstruction, self.sample_rate)
-                log_dict[f'demo_{i}'] = wandb.Audio(filename,
-                                                    sample_rate=self.sample_rate,
-                                                    caption=f'Demo {i}')
+            reals_filename = f'reals_{trainer.global_step:08}.wav'
+            demo_reals = demo_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+            torchaudio.save(reals_filename, demo_reals, self.sample_rate)
+
+
+            log_dict[f'recon'] = wandb.Audio(filename,
+                                                sample_rate=self.sample_rate,
+                                                caption=f'Reconstructed')
+            log_dict[f'real'] = wandb.Audio(reals_filename,
+                                                sample_rate=self.sample_rate,
+                                                caption=f'Real')
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
@@ -110,20 +127,17 @@ def main():
                    help='Size of the style latents')                             
     args = p.parse_args()
 
-    def collate_fn(batch):
-        lengths = torch.tensor([elem[0].shape[-1] for elem in batch])
-        return nn.utils.rnn.pad_sequence([item[0] for item in batch], batch_first=True), lengths
-
     train_set = SampleDataset([args.training_dir], args)
-    train_dl = data.DataLoader(train_set, batch_size=args.batch_size, collate_fn=collate_fn,
+    train_dl = data.DataLoader(train_set, batch_size=args.batch_size,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+    demo_dl = data.DataLoader(train_set, args.num_demos, shuffle=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
 
     last_checkpoint = pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, filename="last")
     
     exc_callback = ExceptionCallback()
 
-    demo_callback = DemoCallback(args)
+    demo_callback = DemoCallback(demo_dl, args)
 
     soundstream = SoundStreamXLLearner(args)
 
@@ -137,7 +151,7 @@ def main():
         callbacks=[last_checkpoint, exc_callback, demo_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
-        max_epochs=100000,
+        max_epochs=1000000,
     )
 
     latent_trainer.fit(soundstream, train_dl)

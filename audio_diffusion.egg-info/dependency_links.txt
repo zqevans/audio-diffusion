@@ -1,2 +1,1 @@
-https://github.com/caillonantoine/cached_conv.git#egg=cached_conv
-https://github.com/caillonantoine/UDLS.git#egg=udls
+

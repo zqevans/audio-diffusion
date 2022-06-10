@@ -1,5 +1,6 @@
 byol
 dataset
 diffusion
+dvae
 encoders
 test

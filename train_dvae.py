@@ -139,7 +139,7 @@ class DiffusionDVAE(pl.LightningModule):
         return self.diffusion_ema(*args, **kwargs)
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=2e-5)
+        return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=4e-5)
 
   
     def training_step(self, batch, batch_idx):

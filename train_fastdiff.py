@@ -20,7 +20,7 @@ from einops import rearrange
 import torchaudio
 import wandb
 
-from dataset.dataset import SpecDataset, SongBatchDataset
+from dataset.dataset import MFCCDataset, SpecDataset
 
 from diffusion.model import ema_update
 from diffusion.FastDiff.FastDiff_model import FastDiff
@@ -100,13 +100,14 @@ class FastDiffTrainer(pl.LightningModule):
         self.ema_decay = global_args.ema_decay
 
     def configure_optimizers(self):
-        optimizer =  optim.Adam([*self.diffusion.parameters()], lr=5e-4)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": optim.lr_scheduler.CosineAnnealingLR(optimizer, eta_min=1e-6, T_max=2000),
-            },
-        }
+        #optimizer =  optim.Adam([*self.diffusion.parameters()], lr=5e-4)
+        # return {
+        #     "optimizer": optimizer,
+        #     "lr_scheduler": {
+        #         "scheduler": optim.lr_scheduler.CosineAnnealingLR(optimizer, eta_min=1e-6, T_max=2000),
+        #     },
+        # }
+        return optim.Adam([*self.diffusion.parameters()], lr=5e-4)
 
   
     def training_step(self, batch, batch_idx):
@@ -242,7 +243,11 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SpecDataset([args.training_dir], args)
+    if args.use_mfcc:
+        train_set = MFCCDataset([args.training_dir], args)
+    else:
+        train_set = SpecDataset([args.training_dir], args)
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 

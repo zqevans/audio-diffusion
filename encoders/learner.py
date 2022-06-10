@@ -5,26 +5,32 @@ from .encoders import SoundStreamXL
 from pytorch_lightning import LightningModule
 
 
+from auraloss.freq import MultiResolutionSTFTLoss
+
+
 class SoundStreamXLLearner(LightningModule):
     def __init__(self, global_args):
         super().__init__()
         self.soundstream = SoundStreamXL(n_io_channels=2, n_feature_channels=32, latent_dim=global_args.style_latent_size, n_quantizers=global_args.num_quantizers, codebook_size=global_args.codebook_size)     
+        self.mrstft = MultiResolutionSTFTLoss()
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        x, lengths_x = batch
-        x = x.to(self.device)
+        audios, filenames = batch
+        audios = audios.to(self.device)
 
         #Get the reconstructed signal
-        G_x, _, vq_losses  = self.soundstream(x)
+        reconstructions, _, vq_losses  = self.soundstream(audios)
 
         #Sum the commit losses
         vq_loss = torch.sum(vq_losses, -1)
 
-        loss = vq_loss
+        stft_loss = self.mrstft(audios, reconstructions)
 
+        loss = vq_loss + stft_loss
 
         log_dict = {'train/loss': loss.detach(), 
                     'train/vq_loss': vq_loss.detach(),
+                    'train/stft_loss': stft_loss.detach()
                     }
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
