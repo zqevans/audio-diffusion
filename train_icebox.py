@@ -7,10 +7,12 @@ import math
 from pathlib import Path
 
 import sys
+import os
 import torch
 from torch import optim, nn
 from torch.nn import functional as F
 from torch.utils import data
+import torch.distributed as dist
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
@@ -18,6 +20,7 @@ from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.plugins import DDPPlugin
 
 from einops import rearrange
+from pprint import pprint
 
 import torchaudio
 from fairscale.nn import checkpoint_wrapper, auto_wrap, wrap
@@ -37,7 +40,7 @@ from icebox.tagbox_utils import audio_for_jbx, load_audio_for_jbx
 from jukebox.make_models import make_vqvae, make_prior, MODELS, make_model
 from jukebox.hparams import Hyperparams, setup_hparams
 #from jukebox.sample import sample_single_window, _sample, sample_partial_window, upsample
-from jukebox.utils.dist_utils import setup_dist_from_mpi
+#from jukebox.utils.dist_utils import setup_dist_from_mpi
 #from jukebox.utils.torch_utils import empty_cache
 
 
@@ -117,8 +120,11 @@ class IceBoxModule(pl.LightningModule):
         self.num_quantizers = global_args.num_quantizers
         self.ema_decay = global_args.ema_decay
 
-        rank, local_rank, device = setup_dist_from_mpi()
-        #rank, local_rank, device = self.local_rank, self.local_rank, self.device #TODO only works on 1 pod
+        #rank, local_rank, device = setup_dist_from_mpi()
+        rank, local_rank, device = int(os.getenv('RANK')), int(os.getenv('LOCAL_RANK')), self.device
+        dist_url = "tcp://127.0.0.1:9500"
+        dist.init_process_group(backend="nccl")
+
         self.hps = Hyperparams()
         assert global_args.sample_rate == 44100, "Jukebox was pretrained at 44100 Hz."
         self.hps.sr = global_args.sample_rate #44100
@@ -303,6 +309,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
     torch.manual_seed(args.seed)
+    #dist.init_process_group(backend="nccl")
 
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
@@ -316,6 +323,11 @@ def main():
     module = IceBoxModule(args)
     wandb_logger.watch(module)
     push_wandb_config(wandb_logger, args)
+
+    #print(os.environ)
+    #for env in ['MASTER_ADDR','MASTER_PORT','RANK','LOCAL_RANK','WORLD_SIZE','GLOBAL_RANK']:
+    #    env_val = os.getenv(env)
+    #    print(f"{env}={env_val}")
 
     trainer = pl.Trainer(
         gpus=args.num_gpus,
