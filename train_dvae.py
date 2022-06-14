@@ -97,11 +97,9 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        #self.encoder = RAVEEncoder(2 * global_args.pqmf_bands, 64, global_args.latent_dim, ratios=[4, 4, 2, 2])
-        self.encoder = AttnResEncoder1D(global_args, depth=7, n_attn_layers=4, downsamples=[0, 4, 4, 2, 2, 2, 2])
+        self.encoder = AttnResEncoder1D(global_args, depth=8, n_attn_layers=4)
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = DiffusionAttnUnet1D(global_args, depth=14)
-        #self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -321,10 +319,10 @@ def main():
     push_wandb_config(wandb_logger, args)
 
     diffusion_trainer = pl.Trainer(
-        #gpus=args.num_gpus,
+        gpus=args.num_gpus,
         accelerator="gpu",
-        devices= args.num_gpus,
-        num_nodes = args.num_nodes,
+        #devices= args.num_gpus,
+        #num_nodes = args.num_nodes,
         strategy='ddp',
         precision=16,
         accumulate_grad_batches={

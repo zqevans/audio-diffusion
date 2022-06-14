@@ -138,7 +138,6 @@ class AttnResEncoder1D(nn.Module):
                     conv_block(c, c, c),
                     conv_block(c, c, c),
                     conv_block(c, c, c),
-                    conv_block(c, c, c),
                 )]
 
         for i in range(1, depth):
@@ -155,9 +154,6 @@ class AttnResEncoder1D(nn.Module):
                     c, c // 32) if i >= attn_start_layer else nn.Identity(),
                 conv_block(c, c, c),
                 SelfAttention1d(
-                    c, c // 32) if i >= attn_start_layer else nn.Identity(),
-                conv_block(c, c, c),
-                SelfAttention1d(
                     c, c // 32) if i >= attn_start_layer else nn.Identity(), 
                 conv_block(c, c, c),
                 SelfAttention1d(
@@ -166,7 +162,6 @@ class AttnResEncoder1D(nn.Module):
         
 
         layers.append(nn.Sequential(
-                    conv_block(c, c, c),
                     conv_block(c, c, c),
                     conv_block(c, c, c),
                     conv_block(c, c, c),
