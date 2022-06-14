@@ -1,8 +1,8 @@
 import torch
 from torch import optim, nn
 from torch.nn import functional as F
-from encoders.encoders import RAVEEncoder, ResConvBlock
-from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes
+from encoders.encoders import ResConvBlock
+from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d
 
 class DiffusionDecoder(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -46,3 +46,71 @@ class DiffusionDecoder(nn.Module):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
         quantized = F.interpolate(quantized, (input.shape[2], ), mode='linear', align_corners=False)
         return self.net(torch.cat([input, timestep_embed, quantized], dim=1))
+
+
+class DiffusionAttnUnet1D(nn.Module):
+    def __init__(self, global_args, io_channels = 2, depth=14, n_attn_layers = 6):
+        super().__init__()
+
+        max_depth = 14
+        depth = min(depth, max_depth)
+        c_mults = [128, 128, 256, 256] + [512] * 10
+
+        self.depth = len(c_mults)
+
+        self.timestep_embed = FourierFeatures(1, 16)
+
+        attn_layer = self.depth - n_attn_layers - 1
+
+        block = nn.Identity()
+
+        conv_block = ResConvBlock
+
+        for i in range(self.depth, 0, -1):
+            c = c_mults[i - 1]
+            if i > 1:
+                c_prev = c_mults[i - 2]
+                block = SkipBlock(
+                    nn.AvgPool1d(2),
+                    conv_block(c_prev, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                    conv_block(c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                    conv_block(c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                    block,
+                    conv_block(c * 2 if i != self.depth else c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                    conv_block(c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                    conv_block(c, c, c_prev),
+                    SelfAttention1d(c_prev, c_prev //
+                                    32) if i >= attn_layer else nn.Identity(),
+                    nn.Upsample(scale_factor=2, mode='linear',
+                                align_corners=False),
+                )
+            else:
+                block = nn.Sequential(
+                    conv_block(io_channels + 16 + global_args.latent_dim, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    block,
+                    conv_block(c * 2, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, io_channels, is_last=True),
+                )
+        self.net = block
+
+        with torch.no_grad():
+            for param in self.net.parameters():
+                param *= 0.5
+
+    def forward(self, input, t, cond):
+        timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
+        cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
+        return self.net(torch.cat([input, timestep_embed, cond], dim=1))

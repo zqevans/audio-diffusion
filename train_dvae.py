@@ -14,23 +14,19 @@ from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from pytorch_lightning.strategies import DDPStrategy
 from einops import rearrange
 
 import torchaudio
-from fairscale.nn import checkpoint_wrapper, auto_wrap, wrap
 
 import wandb
-import numpy as np
-import pandas as pd
 
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from encoders.encoders import RAVEEncoder, ResConvBlock, SoundStreamXLEncoder
+from encoders.encoders import AttnResEncoder1D
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
-from decoders.diffusion_decoder import DiffusionDecoder
+from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud
 
@@ -101,13 +97,20 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = RAVEEncoder(2 * global_args.pqmf_bands, 64, global_args.latent_dim, ratios=[2, 2, 2, 2, 4, 4])
+        #self.encoder = RAVEEncoder(2 * global_args.pqmf_bands, 64, global_args.latent_dim, ratios=[4, 4, 2, 2])
+        self.encoder = AttnResEncoder1D(global_args, depth=7, n_attn_layers=4, downsamples=[0, 4, 4, 2, 2, 2, 2])
         self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
+        self.diffusion = DiffusionAttnUnet1D(global_args, depth=14)
+        #self.diffusion = DiffusionDecoder(global_args.latent_dim, 2)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
         
+        # When True, the encoder is frozen
+        self.warmed_up = False
+
+        self.warmup_steps = global_args.warmup_steps
+
         self.num_quantizers = global_args.num_quantizers
         if self.num_quantizers > 0:
             quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
@@ -163,9 +166,16 @@ class DiffusionDVAE(pl.LightningModule):
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
 
+        if self.global_step > self.warmup_steps:
+            self.warmed_up = True
+
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            tokens = self.encoder(encoder_input).float()
+            if self.warmed_up: #Once the model is warmed up, freeze the encoder and fine-tune the decoder
+                with torch.no_grad():
+                    tokens = self.encoder(encoder_input).float()
+            else:
+                tokens = self.encoder(encoder_input).float()
 
         if self.num_quantizers > 0:
             #Rearrange for Memcodes
@@ -242,17 +252,19 @@ class DemoCallback(pl.Callback):
 
         noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
 
-        tokens = module.encoder_ema(encoder_input)
+        with torch.no_grad():
 
-        if self.quantized:
+            tokens = module.encoder_ema(encoder_input)
 
-            #Rearrange for Memcodes
-            tokens = rearrange(tokens, 'b d n -> b n d')
+            if self.quantized:
 
-            tokens, _= module.quantizer_ema(tokens)
-            tokens = rearrange(tokens, 'b n d -> b d n')
+                #Rearrange for Memcodes
+                tokens = rearrange(tokens, 'b d n -> b n d')
 
-        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
+                tokens, _= module.quantizer_ema(tokens)
+                tokens = rearrange(tokens, 'b n d -> b d n')
+
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -279,7 +291,7 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
 
-            log_dict[f'embeddings'] = embeddings_table(tokens)
+            #log_dict[f'embeddings'] = embeddings_table(tokens)
 
             log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
 
@@ -309,8 +321,10 @@ def main():
     push_wandb_config(wandb_logger, args)
 
     diffusion_trainer = pl.Trainer(
-        gpus=args.num_gpus,
+        #gpus=args.num_gpus,
         accelerator="gpu",
+        devices= args.num_gpus,
+        num_nodes = args.num_nodes,
         strategy='ddp',
         precision=16,
         accumulate_grad_batches={

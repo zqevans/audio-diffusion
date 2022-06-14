@@ -1,9 +1,10 @@
 ## Modified from https://github.com/wesbz/SoundStream/blob/main/net.py
 import numpy as np
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from diffusion.model import ResidualBlock
+from diffusion.model import ResidualBlock, SelfAttention1d
 
 from vector_quantize_pytorch import ResidualVQ
 
@@ -103,11 +104,86 @@ class ResConvBlock(ResidualBlock):
         super().__init__([
             nn.Conv1d(c_in, c_mid, 5, padding=2),
             nn.GroupNorm(1, c_mid),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv1d(c_mid, c_out, 5, padding=2),
             nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
-            nn.ReLU(inplace=True) if not is_last else nn.Identity(),
+            nn.SiLU(inplace=True) if not is_last else nn.Identity(),
         ], skip)
+
+class AttnResEncoder1D(nn.Module):
+    def __init__(
+        self, 
+        global_args, 
+        n_io_channels=2, 
+        depth=12, 
+        n_attn_layers = 5, 
+        downsamples = [0, 2, 2, 2] + [2] * 8,
+        c_mults = [128, 128, 256, 256] + [512] * 8
+    ):
+        super().__init__()
+
+        max_depth = 12
+        depth = min(depth, max_depth)
+                
+        c_mults = c_mults[:depth]
+        downsamples = downsamples[:depth]
+
+        conv_block = ResConvBlock
+
+        attn_start_layer = depth - n_attn_layers
+
+        c = c_mults[0]
+        layers = [nn.Sequential(
+                    conv_block(n_io_channels, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                )]
+
+        for i in range(1, depth):
+            c = c_mults[i]
+            downsample = downsamples[i] 
+            c_prev = c_mults[i - 1]
+            layers.append(nn.Sequential(
+                nn.AvgPool1d(downsample),
+                conv_block(c_prev, c, c),
+                SelfAttention1d(
+                    c, c // 32) if i >= attn_start_layer else nn.Identity(),
+                conv_block(c, c, c),
+                SelfAttention1d(
+                    c, c // 32) if i >= attn_start_layer else nn.Identity(),
+                conv_block(c, c, c),
+                SelfAttention1d(
+                    c, c // 32) if i >= attn_start_layer else nn.Identity(),
+                conv_block(c, c, c),
+                SelfAttention1d(
+                    c, c // 32) if i >= attn_start_layer else nn.Identity(), 
+                conv_block(c, c, c),
+                SelfAttention1d(
+                    c, c // 32) if i >= attn_start_layer else nn.Identity(),                  
+            ))
+        
+
+        layers.append(nn.Sequential(
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, global_args.latent_dim, is_last=True)
+                    )
+                )
+
+        self.net = nn.Sequential(*layers)
+
+        print(f"Encoder downsampling ratio: {np.prod(downsamples[1:])}")
+
+        with torch.no_grad():
+            for param in self.net.parameters():
+                param *= 0.5
+
+    def forward(self, input):
+        return self.net(input)
 
 class GlobalEncoder(nn.Sequential):
     def __init__(self, latent_size, io_channels):
@@ -173,7 +249,8 @@ class RAVEEncoder(nn.Module):
                  latent_dim,
                  ratios= [4, 4, 4, 2],
                  padding_mode="centered",
-                 bias=False):
+                 bias=False,
+                 sigmoid = "tanh"):
         super().__init__()
         net = [
             nn.Conv1d(n_in_channels,
@@ -240,8 +317,10 @@ class RAVEEncoder(nn.Module):
         downsampling_ratio = (n_in_channels // 2) * np.prod(ratios)
         print(f'Encoder downsampling ratio: {downsampling_ratio}')
 
+        self.sigmoid = nn.Tanh() if sigmoid is not None else nn.Identity()
+
     def forward(self, x):
-        return self.net(x)
+        return self.sigmoid(self.net(x))
 
 class SoundStreamXLEncoder(nn.Module):
     def __init__(self, n_channels, latent_dim, n_io_channels=1, strides=[2, 2, 4, 5, 8], c_mults=[2, 4, 4, 8, 16]):

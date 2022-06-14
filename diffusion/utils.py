@@ -8,7 +8,7 @@ def get_alphas_sigmas(t):
     return torch.cos(t * math.pi / 2), torch.sin(t * math.pi / 2)
 
 class PadCrop(nn.Module):
-    def __init__(self, n_samples, randomize=False):
+    def __init__(self, n_samples, randomize=True):
         super().__init__()
         self.n_samples = n_samples
         self.randomize = randomize
