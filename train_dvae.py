@@ -97,9 +97,9 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, depth=8, n_attn_layers=4)
+        self.encoder = AttnResEncoder1D(global_args, depth=9, n_attn_layers=2)
         self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionAttnUnet1D(global_args, depth=14)
+        self.diffusion = DiffusionAttnUnet1D(global_args)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay

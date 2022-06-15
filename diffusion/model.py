@@ -1,6 +1,5 @@
 from copy import deepcopy
 import math
-from perceiver_pytorch import Perceiver
 import pytorch_lightning as pl
 from byol.byol_pytorch import BYOL
 import torch
@@ -125,32 +124,6 @@ class Transpose(nn.Sequential):
     def forward(self, input):
         return torch.transpose(input, self.dim0, self.dim1)
 
-class AudioPerceiverEncoder(nn.Module):
-    def __init__(self, n_io_channels, global_args):
-        super().__init__()
-        self.net = Perceiver(
-            input_channels=n_io_channels,          # number of channels for each token of the input
-            input_axis=1,# number of axis for input data (1 for audio, 2 for images, 3 for video)            
-            num_freq_bands=128,# number of freq bands, with original value (2 * K + 1)
-            max_freq=1000.,  # maximum frequency, hyperparameter depending on how fine the data is
-            depth=10,# depth of net. The shape of the final attention mechanism will be:
-                     # depth * (cross attention -> self_per_cross_attn * self attention)
-            num_latents=256,  # number of latents, or induced set points, or centroids. different papers giving it different names
-            latent_dim=512,            # latent dimension
-            cross_heads=1,             # number of heads for cross attention. paper said 1
-            latent_heads=8,            # number of heads for latent self attention, 8
-            cross_dim_head=64,         # number of dimensions per cross attention head
-            latent_dim_head=64,        # number of dimensions per latent self attention head
-            num_classes=global_args.style_latent_size,          # output number of classes
-            attn_dropout=0.,
-            ff_dropout=0.,
-            weight_tie_layers=True,# whether to weight tie layers (optional, as indicated in the diagram)
-            fourier_encode_data=True,  # whether to auto-fourier encode the data, using the input_axis given. defaults to True, but can be turned off if you are fourier encoding the data yourself
-            self_per_cross_attn=2      # number of self attention blocks per cross attention
-        )
-
-    def forward(self, input):
-        return self.net(input)
 
 
 class AudioDiffusion(nn.Module):

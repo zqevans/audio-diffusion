@@ -4,7 +4,7 @@ from torch.nn import functional as F
 from encoders.encoders import ResConvBlock
 from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d
 
-class DiffusionDecoder(nn.Module):
+class DiffusionResConvUnet(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
         super().__init__()
         max_depth = 16
