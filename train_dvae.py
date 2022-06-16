@@ -97,7 +97,7 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, depth=9, n_attn_layers=2)
+        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=5, n_attn_layers=5, c_mults=[512, 512, 512, 512, 512])
         self.encoder_ema = deepcopy(self.encoder)
         self.diffusion = DiffusionAttnUnet1D(global_args)
         self.diffusion_ema = deepcopy(self.diffusion)
