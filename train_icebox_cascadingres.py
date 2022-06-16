@@ -330,7 +330,7 @@ class DemoCallback(pl.Callback):
         resample_to_lowest = T.Resample(module.sample_rate, (module.sample_rate//4**2)).to(module.device)
         resample_to_mid = T.Resample(module.sample_rate, (module.sample_rate//4)).to(module.device)
         lowest_res_reals = resample_to_lowest(demo_reals)
-        mid_res_reals = resample_to_mid(demo_reals)
+        #mid_res_reals = resample_to_mid(demo_reals) #unused
 
         # ENCODING: encode all token levels using full res signal
         encoder_input = audio_for_jbx(demo_reals[:,0,:]).to(module.device) 
