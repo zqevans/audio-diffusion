@@ -104,5 +104,17 @@ def audio_spectrogram_image(waveform, power=2.0, sample_rate=48000):
     return spectrogram_image(melspec, title="MelSpectrogram", ylabel='mel bins (log freq)')
 
 
-def token_spectrogram_image(tokens):
-    pass
+def tokens_spectrogram_image(tokens, aspect='auto', title='Embeddings', ylabel='index'):
+    embeddings = rearrange(tokens, 'b d n -> (b n) d') 
+    print(f"tokens_spectrogram_image: embeddings.shape = ",embeddings.shape)
+    fig = Figure(figsize=(10, 4), dpi=100)
+    canvas = FigureCanvasAgg(fig)
+    axs = fig.add_subplot()
+    axs.set_title(title or 'Embeddings')
+    axs.set_ylabel(ylabel)
+    axs.set_xlabel('time frame')
+    im = axs.imshow(embeddings.cpu().numpy().T, origin='lower', aspect=aspect) #.T because numpy is x/y 'backwards'
+    fig.colorbar(im, ax=axs)
+    canvas.draw()
+    rgba = np.asarray(canvas.buffer_rgba())
+    return Image.fromarray(rgba)
