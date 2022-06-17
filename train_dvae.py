@@ -28,7 +28,8 @@ from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
-from viz.viz import embeddings_table, pca_point_cloud
+from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image
+
 
 # Define the noise schedule and sampling loop
 def get_alphas_sigmas(t):
@@ -293,6 +294,10 @@ class DemoCallback(pl.Callback):
 
             log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
 
+            log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
+            log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
+
+
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
@@ -346,3 +351,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
