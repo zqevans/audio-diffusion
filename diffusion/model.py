@@ -200,39 +200,6 @@ class AudioDiffusion(nn.Module):
         self.state.clear()
         return out
 
-
-class SelfSupervisedLearner(pl.LightningModule):
-    def __init__(self, net, init_tensor, augment_fn, input_tf=None, **kwargs):
-        super().__init__()
-        self.input_tf = input_tf
-
-        #Encode the mock input tensor as well
-        if self.input_tf is not None:
-            init_tensor = self.input_tf(init_tensor)
-
-        self.learner = BYOL(net, init_tensor, augment_fn=augment_fn, **kwargs)
-
-    def forward(self, inputs):
-        inputs = inputs[0]
-
-        if self.input_tf is not None:
-            inputs = self.input_tf(inputs)
-
-        return self.learner(inputs)
-
-    def training_step(self, inputs, _):
-        loss = self.forward(inputs)
-        log_dict = {'train/loss': loss.detach()}
-        self.log_dict(log_dict, prog_bar=True, on_step=True)
-        return {'loss': loss}
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-4)
-
-    def on_before_zero_grad(self, _):
-        if self.learner.use_momentum:
-            self.learner.update_moving_average()
-
 class LightningDiffusion(pl.LightningModule):
     def __init__(self, encoder, global_args):
         super().__init__()

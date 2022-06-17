@@ -15,8 +15,6 @@ import torchaudio
 from torchaudio import transforms as T
 import wandb
 
-from byol.byol_pytorch import RandomApply
-
 from dataset.dataset import SampleDataset
 from diffusion.inference import sample
 from diffusion.model import LightningDiffusion, AudioPerceiverEncoder, SelfSupervisedLearner, Transpose
