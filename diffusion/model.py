@@ -1,7 +1,6 @@
 from copy import deepcopy
 import math
 import pytorch_lightning as pl
-from byol.byol_pytorch import BYOL
 import torch
 from torch import nn
 from torch import optim
