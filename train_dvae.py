@@ -99,7 +99,7 @@ class DiffusionDVAE(pl.LightningModule):
 
         self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=5, n_attn_layers=5, c_mults=[512, 512, 512, 512, 512])
         self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionAttnUnet1D(global_args)
+        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, depth=10, n_attn_layers=1)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -148,8 +148,13 @@ class DiffusionDVAE(pl.LightningModule):
 
         encoder_input = reals
 
+        #PQMF the encoder input
         if self.pqmf_bands > 1:
             encoder_input = self.pqmf(reals)
+
+            # Disable this line to not PQMF the diffusion input
+            reals = self.pqmf(reals)
+
         
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -161,6 +166,7 @@ class DiffusionDVAE(pl.LightningModule):
         alphas = alphas[:, None, None]
         sigmas = sigmas[:, None, None]
         noise = torch.randn_like(reals)
+
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
 
@@ -241,14 +247,16 @@ class DemoCallback(pl.Callback):
 
         encoder_input = demo_reals
         
+        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples])
+
         if self.pqmf_bands > 1:
             encoder_input = self.pqmf(demo_reals)
+            noise = self.pqmf(noise)
+            noise = torch.randn_like(noise)
         
-        encoder_input = encoder_input.to(module.device)
-
         demo_reals = demo_reals.to(module.device)
-
-        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
+        encoder_input = encoder_input.to(module.device)
+        noise = noise.to(module.device)
 
         with torch.no_grad():
 
@@ -263,6 +271,9 @@ class DemoCallback(pl.Callback):
                 tokens = rearrange(tokens, 'b n d -> b d n')
 
             fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
+
+        if self.pqmf_bands > 0:
+            fakes = self.pqmf.inverse(fakes.cpu())
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')

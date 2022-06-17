@@ -56,17 +56,15 @@ class DiffusionAttnUnet1D(nn.Module):
         depth = min(depth, max_depth)
         c_mults = [128, 128, 256, 256] + [512] * 10
 
-        self.depth = len(c_mults)
-
         self.timestep_embed = FourierFeatures(1, 16)
 
-        attn_layer = self.depth - n_attn_layers - 1
+        attn_layer = depth - n_attn_layers - 1
 
         block = nn.Identity()
 
         conv_block = ResConvBlock
 
-        for i in range(self.depth, 0, -1):
+        for i in range(depth, 0, -1):
             c = c_mults[i - 1]
             if i > 1:
                 c_prev = c_mults[i - 2]
@@ -82,7 +80,7 @@ class DiffusionAttnUnet1D(nn.Module):
                     SelfAttention1d(
                         c, c // 32) if i >= attn_layer else nn.Identity(),
                     block,
-                    conv_block(c * 2 if i != self.depth else c, c, c),
+                    conv_block(c * 2 if i != depth else c, c, c),
                     SelfAttention1d(
                         c, c // 32) if i >= attn_layer else nn.Identity(),
                     conv_block(c, c, c),
@@ -112,5 +110,5 @@ class DiffusionAttnUnet1D(nn.Module):
 
     def forward(self, input, t, cond):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
+        cond = F.interpolate(cond, (input.shape[2], ), mode='bicubic', align_corners=False)
         return self.net(torch.cat([input, timestep_embed, cond], dim=1))
