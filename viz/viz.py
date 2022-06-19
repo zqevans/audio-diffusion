@@ -113,7 +113,7 @@ def tokens_spectrogram_image(tokens, aspect='auto', title='Embeddings', ylabel='
     axs.set_title(title or 'Embeddings')
     axs.set_ylabel(ylabel)
     axs.set_xlabel('time frame')
-    im = axs.imshow(embeddings.cpu().numpy().T, origin='lower', aspect=aspect) #.T because numpy is x/y 'backwards'
+    im = axs.imshow(embeddings.cpu().numpy().T, origin='lower', aspect=aspect, interpolation='none') #.T because numpy is x/y 'backwards'
     fig.colorbar(im, ax=axs)
     canvas.draw()
     rgba = np.asarray(canvas.buffer_rgba())
