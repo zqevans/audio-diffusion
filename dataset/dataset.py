@@ -13,11 +13,11 @@ class SampleDataset(torch.utils.data.Dataset):
     self.augs = torch.nn.Sequential(
       #RandomGain(0.9, 1.0),
       PadCrop(global_args.sample_size, randomize=global_args.random_crop),
-      NormInputs(do_norm=global_args.norm_inputs),
+      #NormInputs(do_norm=global_args.norm_inputs),
       #OneMinus(), # this is crazy, reverse the signal rel. to +/-1
       #RandPool(),
       #FillTheNoise(),
-      PhaseFlipper(),
+      #PhaseFlipper(),
       #NormInputs(do_norm=global_args.norm_inputs),
     )
 

@@ -65,7 +65,7 @@ def pca_point_cloud(tokens):
     return wandb.Object3D(point_cloud)
 
 
-def spectrogram_image(spec, title=None, ylabel='freq_bin', aspect='auto', xmax=None, db_range=[35,120]):
+def spectrogram_image(spec, title=None, ylabel='freq_bin', aspect='auto', xmax=None):
     """
     # cf. https://pytorch.org/tutorials/beginner/audio_feature_extractions_tutorial.html
 
@@ -76,7 +76,7 @@ def spectrogram_image(spec, title=None, ylabel='freq_bin', aspect='auto', xmax=N
     axs.set_title(title or 'Spectrogram (db)')
     axs.set_ylabel(ylabel)
     axs.set_xlabel('frame')
-    im = axs.imshow(librosa.power_to_db(spec), origin='lower', aspect=aspect, vmin=db_range[0], vmax=db_range[1])
+    im = axs.imshow(librosa.power_to_db(spec), origin='lower', aspect=aspect)
     if xmax:
         axs.set_xlim((0, xmax))
     fig.colorbar(im, ax=axs)
@@ -99,22 +99,9 @@ def audio_spectrogram_image(waveform, power=2.0, sample_rate=48000):
         hop_length=hop_length, center=True, pad_mode="reflect", power=power, 
         norm='slaney', onesided=True, n_mels=n_mels, mel_scale="htk")
 
-    melspec = mel_spectrogram_op(waveform.float())
-    melspec = melspec[0] # TODO: only left channel for now
+    melspec = mel_spectrogram_op(waveform)[0] # TODO: only left channel for now
     return spectrogram_image(melspec, title="MelSpectrogram", ylabel='mel bins (log freq)')
 
 
-def tokens_spectrogram_image(tokens, aspect='auto', title='Embeddings', ylabel='index'):
-    embeddings = rearrange(tokens, 'b d n -> (b n) d') 
-    print(f"tokens_spectrogram_image: embeddings.shape = ",embeddings.shape)
-    fig = Figure(figsize=(10, 4), dpi=100)
-    canvas = FigureCanvasAgg(fig)
-    axs = fig.add_subplot()
-    axs.set_title(title or 'Embeddings')
-    axs.set_ylabel(ylabel)
-    axs.set_xlabel('time frame')
-    im = axs.imshow(embeddings.cpu().numpy().T, origin='lower', aspect=aspect, interpolation='none') #.T because numpy is x/y 'backwards'
-    fig.colorbar(im, ax=axs)
-    canvas.draw()
-    rgba = np.asarray(canvas.buffer_rgba())
-    return Image.fromarray(rgba)
+def token_spectrogram_image(tokens):
+    pass

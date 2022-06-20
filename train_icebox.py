@@ -7,34 +7,30 @@ import math
 from pathlib import Path
 
 import sys
+import os
 import torch
 from torch import optim, nn
 from torch.nn import functional as F
 from torch.utils import data
+import torch.distributed as dist
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from pytorch_lightning.strategies import DDPStrategy
-from pytorch_lightning.plugins import DDPPlugin
 
 from einops import rearrange
 
 import torchaudio
-from fairscale.nn import checkpoint_wrapper, auto_wrap, wrap
 
 import wandb
 import numpy as np
 import pandas as pd
 
 from dataset.dataset import SampleDataset
-from encoders.encoders import SoundStreamXL, SoundStreamXLEncoder, SoundStreamXLDecoder
-from vector_quantize_pytorch import ResidualVQ
-from dvae.residual_memcodes import ResidualMemcodes
-from decoders.diffusion_decoder import DiffusionDecoder
+from decoders.diffusion_decoder import DiffusionResConvUnet as DiffusionDecoder
 from diffusion.model import ema_update
 
 from icebox.tagbox_utils import audio_for_jbx, load_audio_for_jbx
-from jukebox.make_models import make_vqvae, make_prior, MODELS, make_model
+from jukebox.make_models import make_vqvae
 from jukebox.hparams import Hyperparams, setup_hparams
 #from jukebox.sample import sample_single_window, _sample, sample_partial_window, upsample
 from jukebox.utils.dist_utils import setup_dist_from_mpi
@@ -43,7 +39,7 @@ from jukebox.utils.dist_utils import setup_dist_from_mpi
 
 
 # lonewater's auraloss fork:  pip install --no-cache-dir -U git+https://github.com/lonewater/auraloss.git@PWCmplxDif
-from auraloss.freq import MultiResolutionSTFTLoss, PerceptuallyWeightedComplexLoss, MultiResolutionPrcptWghtdCmplxLoss
+#from auraloss.freq import MultiResolutionSTFTLoss, PerceptuallyWeightedComplexLoss, MultiResolutionPrcptWghtdCmplxLoss
 
 from viz.viz import embeddings_table, pca_point_cloud
 
@@ -117,8 +113,11 @@ class IceBoxModule(pl.LightningModule):
         self.num_quantizers = global_args.num_quantizers
         self.ema_decay = global_args.ema_decay
 
-        rank, local_rank, device = setup_dist_from_mpi()
+        #rank, local_rank, device = setup_dist_from_mpi()
         #rank, local_rank, device = self.local_rank, self.local_rank, self.device #TODO only works on 1 pod
+        dist.init_process_group(backend="nccl")
+        rank, local_rank, device = int(os.getenv('RANK')), int(os.getenv('LOCAL_RANK')), self.device
+
         self.hps = Hyperparams()
         assert global_args.sample_rate == 44100, "Jukebox was pretrained at 44100 Hz."
         self.hps.sr = global_args.sample_rate #44100
@@ -127,11 +126,10 @@ class IceBoxModule(pl.LightningModule):
 
         vqvae = "vqvae"
         self.vqvae = make_vqvae(setup_hparams(vqvae, dict(sample_length = 1048576)), self.device)
-        for param in self.vqvae.parameters():  # FREEZE IT
-            param.requires_grad = False
+        # for param in self.vqvae.parameters():  # FREEZE IT
+        #     param.requires_grad = False
 
         self.encoder = self.vqvae.encode
-        self.encoder_ema = deepcopy(self.encoder)
 
         latent_dim = 64 # global_args.latent_dim. Jukebox is 64
         io_channels = 2#1 # 2.  Jukebox is mono but we decode in stereo
@@ -147,17 +145,15 @@ class IceBoxModule(pl.LightningModule):
 
 
         # losses
-        self.mstft = MultiResolutionSTFTLoss()
-        self.pwcl = PerceptuallyWeightedComplexLoss()
-        self.mrpwcl = MultiResolutionPrcptWghtdCmplxLoss()
+        # self.mstft = MultiResolutionSTFTLoss()
+        # self.pwcl = PerceptuallyWeightedComplexLoss()
+        # self.mrpwcl = MultiResolutionPrcptWghtdCmplxLoss()
 
     def configure_optimizers(self): # only decoderf
         return optim.Adam([*self.diffusion.parameters()], lr=2e-5)
 
     def encode(self, *args, **kwargs):
-        if self.training:
-            return self.encoder(*args, **kwargs)
-        return self.encoder_ema(*args, **kwargs)
+        return self.encoder(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
         if self.training:
@@ -168,9 +164,7 @@ class IceBoxModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         reals = batch[0]  # grab actual audio part of batch, not the filenames
 
-        #print("reals.size() = ",reals.size())
         reals_mono = reals[:,0,:] # mono only, sorry
-        #print("reals_mono.size() = ",reals_mono.size())
 
         encoder_input = audio_for_jbx(reals_mono, device=reals.device)
 
@@ -189,12 +183,11 @@ class IceBoxModule(pl.LightningModule):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            zs = self.encoder(encoder_input) # indices at 3 resolutions
-            xs = self.vqvae.bottleneck.decode(zs) # vectors vectors at 3 resolutions
-            tokens = self.package_3layer_tokens(xs).float() # combine resolutions
+            with torch.no_grad():
+                zs = self.encoder(encoder_input) # indices at 3 resolutions
+                xs = self.vqvae.bottleneck.decode(zs) # vectors vectors at 3 resolutions
+                tokens = self.package_3layer_tokens(xs).float() # combine resolutions
 
-
-        with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, tokens)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
@@ -210,7 +203,6 @@ class IceBoxModule(pl.LightningModule):
     def on_before_zero_grad(self, *args, **kwargs):
         decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         ema_update(self.diffusion, self.diffusion_ema, decay)
-        #ema_update(self.encoder, self.encoder_ema, decay) # frozen
 
         if self.num_quantizers > 0:
             ema_update(self.quantizer, self.quantizer_ema, decay)
@@ -320,7 +312,7 @@ def main():
     trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        #strategy='ddp', 
+        strategy='ddp', 
         #strategy = 'ddp_find_unused_parameters_false', #without this I get lots of warnings and it goes slow
         precision=32,
         accumulate_grad_batches={
