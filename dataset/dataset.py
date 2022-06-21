@@ -37,7 +37,10 @@ class SampleDataset(torch.utils.data.Dataset):
         self.filenames += glob(f'{path}/**/*.{ext}', recursive=True)
 
     self.sr = global_args.sample_rate
-    self.load_frac = global_args.load_frac
+    if hasattr(global_args,'load_frac'):
+      self.load_frac = global_args.load_frac
+    else:
+      self.load_frac = 1.0
     self.num_gpus = global_args.num_gpus
 
     self.cache_training_data = global_args.cache_training_data
