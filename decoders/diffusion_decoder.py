@@ -1,8 +1,7 @@
 import torch
-from torch import optim, nn
+from torch import nn
 from torch.nn import functional as F
-from encoders.encoders import ResConvBlock
-from diffusion.model import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d
+from blocks.blocks import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d, ResConvBlock
 
 class DiffusionResConvUnet(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -49,12 +48,18 @@ class DiffusionResConvUnet(nn.Module):
 
 
 class DiffusionAttnUnet1D(nn.Module):
-    def __init__(self, global_args, io_channels = 2, depth=14, n_attn_layers = 6):
+    def __init__(
+        self, 
+        global_args, 
+        io_channels = 2, 
+        depth=14, 
+        n_attn_layers = 6,
+        c_mults = [128, 128, 256, 256] + [512] * 10
+    ):
         super().__init__()
 
         max_depth = 14
         depth = min(depth, max_depth)
-        c_mults = [128, 128, 256, 256] + [512] * 10
 
         self.timestep_embed = FourierFeatures(1, 16)
 
@@ -110,5 +115,5 @@ class DiffusionAttnUnet1D(nn.Module):
 
     def forward(self, input, t, cond):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        cond = F.interpolate(cond, (input.shape[2], ), mode='bicubic', align_corners=False)
+        cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
         return self.net(torch.cat([input, timestep_embed, cond], dim=1))

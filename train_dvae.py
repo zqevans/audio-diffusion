@@ -98,18 +98,13 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=5, n_attn_layers=5, c_mults=[512, 512, 512, 512, 512])
+        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=4, n_attn_layers=2, c_mults=[512, 512, 1024,1024])
         self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionAttnUnet1D(global_args)
+        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=6)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
         
-        # When True, the encoder is frozen
-        self.warmed_up = False
-
-        self.warmup_steps = global_args.warmup_steps
-
         self.num_quantizers = global_args.num_quantizers
         if self.num_quantizers > 0:
             quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
@@ -165,16 +160,9 @@ class DiffusionDVAE(pl.LightningModule):
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
 
-        if self.global_step > self.warmup_steps:
-            self.warmed_up = True
-
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            if self.warmed_up: #Once the model is warmed up, freeze the encoder and fine-tune the decoder
-                with torch.no_grad():
-                    tokens = self.encoder(encoder_input).float()
-            else:
-                tokens = self.encoder(encoder_input).float()
+            tokens = self.encoder(encoder_input).float()
 
         if self.num_quantizers > 0:
             #Rearrange for Memcodes
@@ -185,7 +173,7 @@ class DiffusionDVAE(pl.LightningModule):
 
             tokens = rearrange(tokens, 'b n d -> b d n')
 
-        # p = torch.rand([reals.shape[0], 1], device=reals.device)
+        # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
         # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
 
         with torch.cuda.amp.autocast():
@@ -290,10 +278,10 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
 
-            #log_dict[f'embeddings'] = embeddings_table(tokens)
+            log_dict[f'embeddings'] = embeddings_table(tokens)
 
             log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
-            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(tokens))
+            #log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(tokens))
 
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
@@ -331,17 +319,7 @@ def main():
         #num_nodes = args.num_nodes,
         strategy='ddp',
         precision=16,
-        accumulate_grad_batches={
-            0:1, 
-            1: args.accum_batches #Start without accumulation
-            # 5:2,
-            # 10:3, 
-            # 12:4, 
-            # 14:5, 
-            # 16:6, 
-            # 18:7,  
-            # 20:8
-            }, 
+        accumulate_grad_batches=args.accum_batches, 
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,

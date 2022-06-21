@@ -3,21 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from diffusion.model import ResidualBlock, SelfAttention1d
-
 from perceiver_pytorch import Perceiver
 
-class ResConvBlock(ResidualBlock):
-    def __init__(self, c_in, c_mid, c_out, is_last=False):
-        skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
-        super().__init__([
-            nn.Conv1d(c_in, c_mid, 5, padding=2),
-            nn.GroupNorm(1, c_mid),
-            nn.SiLU(inplace=True),
-            nn.Conv1d(c_mid, c_out, 5, padding=2),
-            nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
-            nn.SiLU(inplace=True) if not is_last else nn.Identity(),
-        ], skip)
+from blocks.blocks import SelfAttention1d, ResConvBlock
 
 class AttnResEncoder1D(nn.Module):
     def __init__(
@@ -34,6 +22,8 @@ class AttnResEncoder1D(nn.Module):
         max_depth = 12
         depth = min(depth, max_depth)
                 
+        self.act = torch.tanh
+        
         c_mults = c_mults[:depth]
         downsamples = downsamples[:depth]
 
@@ -87,7 +77,7 @@ class AttnResEncoder1D(nn.Module):
                 param *= 0.5
 
     def forward(self, input):
-        return self.net(input)
+        return self.act(self.net(input))
 
 class GlobalEncoder(nn.Sequential):
     def __init__(self, latent_size, io_channels):
