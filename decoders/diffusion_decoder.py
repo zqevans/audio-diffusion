@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from blocks.blocks import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d, ResConvBlock
+from blocks.blocks import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d, ResConvBlock, Downsample1d, Upsample1d
 
 class DiffusionResConvUnet(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -73,29 +73,31 @@ class DiffusionAttnUnet1D(nn.Module):
             c = c_mults[i - 1]
             if i > 1:
                 c_prev = c_mults[i - 2]
+                add_attn = i >= attn_layer and n_attn_layers > 0
                 block = SkipBlock(
-                    nn.AvgPool1d(2),
+                    Downsample1d("cubic"),
                     conv_block(c_prev, c, c),
                     SelfAttention1d(
-                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                        c, c // 32) if add_attn else nn.Identity(),
                     conv_block(c, c, c),
                     SelfAttention1d(
-                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                        c, c // 32) if add_attn else nn.Identity(),
                     conv_block(c, c, c),
                     SelfAttention1d(
-                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                        c, c // 32) if add_attn else nn.Identity(),
                     block,
                     conv_block(c * 2 if i != depth else c, c, c),
                     SelfAttention1d(
-                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                        c, c // 32) if add_attn else nn.Identity(),
                     conv_block(c, c, c),
                     SelfAttention1d(
-                        c, c // 32) if i >= attn_layer else nn.Identity(),
+                        c, c // 32) if add_attn else nn.Identity(),
                     conv_block(c, c, c_prev),
                     SelfAttention1d(c_prev, c_prev //
-                                    32) if i >= attn_layer else nn.Identity(),
-                    nn.Upsample(scale_factor=2, mode='linear',
-                                align_corners=False),
+                                    32) if add_attn else nn.Identity(),
+                    Upsample1d(kernel="cubic")
+                    # nn.Upsample(scale_factor=2, mode='linear',
+                    #             align_corners=False),
                 )
             else:
                 block = nn.Sequential(

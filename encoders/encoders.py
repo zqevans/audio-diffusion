@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from perceiver_pytorch import Perceiver
 
-from blocks.blocks import SelfAttention1d, ResConvBlock
+from blocks.blocks import Downsample1d, SelfAttention1d, ResConvBlock
 
 class AttnResEncoder1D(nn.Module):
     def __init__(
@@ -41,22 +41,23 @@ class AttnResEncoder1D(nn.Module):
 
         for i in range(1, depth):
             c = c_mults[i]
-            downsample = downsamples[i] 
+            #downsample = downsamples[i] 
             c_prev = c_mults[i - 1]
+            add_attn = i >= attn_start_layer and n_attn_layers > 0
             layers.append(nn.Sequential(
-                nn.AvgPool1d(downsample),
+                Downsample1d(kernel="cubic"),
                 conv_block(c_prev, c, c),
                 SelfAttention1d(
-                    c, c // 32) if i >= attn_start_layer else nn.Identity(),
+                    c, c // 32) if add_attn else nn.Identity(),
                 conv_block(c, c, c),
                 SelfAttention1d(
-                    c, c // 32) if i >= attn_start_layer else nn.Identity(),
+                    c, c // 32) if add_attn else nn.Identity(),
                 conv_block(c, c, c),
                 SelfAttention1d(
-                    c, c // 32) if i >= attn_start_layer else nn.Identity(), 
+                    c, c // 32) if add_attn else nn.Identity(),
                 conv_block(c, c, c),
                 SelfAttention1d(
-                    c, c // 32) if i >= attn_start_layer else nn.Identity(),                  
+                    c, c // 32) if add_attn else nn.Identity(),
             ))
         
 
