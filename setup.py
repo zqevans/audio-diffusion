@@ -12,6 +12,7 @@ setup(
         'fairscale',
         'nwt-pytorch',
         'perceiver-pytorch',
+        'prefigure',
         'pytorch_lightning', 
         'torch',
         'torchaudio',
