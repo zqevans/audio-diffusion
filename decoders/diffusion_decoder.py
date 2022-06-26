@@ -1,7 +1,8 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from blocks.blocks import SkipBlock, FourierFeatures, expand_to_planes, SelfAttention1d, ResConvBlock, Downsample1d, Upsample1d
+from blocks.blocks import DBlock, MappingNet, SkipBlock, FourierFeatures, UBlock, UNet, expand_to_planes, SelfAttention1d, ResConvBlock, Downsample1d, Upsample1d
+from blocks.utils import append_dims
 
 class DiffusionResConvUnet(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -119,3 +120,74 @@ class DiffusionAttnUnet1D(nn.Module):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
         cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
         return self.net(torch.cat([input, timestep_embed, cond], dim=1))
+
+
+class AudioDenoiserModel(nn.Module):
+    def __init__(
+        self, 
+        c_in,
+        feats_in,
+        depths, 
+        channels,
+        self_attn_depths,
+        mapping_cond_dim=0,
+        unet_cond_dim=0,
+        dropout_rate=0.
+    ):
+        super().__init__()
+        self.timestep_embed = FourierFeatures(1, feats_in)
+        if mapping_cond_dim > 0:
+            self.mapping_cond = nn.Linear(mapping_cond_dim, feats_in, bias=False)
+        self.mapping = MappingNet(feats_in, feats_in)
+        self.proj_in = nn.Conv1d(c_in + unet_cond_dim, channels[0], 1)
+        self.proj_out = nn.Conv1d(channels[0], c_in, 1)
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+        d_blocks, u_blocks = [], []
+        for i in range(len(depths)):
+            my_c_in = channels[i] if i==0 else channels[i-1]
+            d_blocks.append(DBlock(depths[i], feats_in, my_c_in, channels[i], channels[i], downsample=i>0, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
+
+        for i in range(len(depths)):
+            my_c_in = channels[i] * 2 if i < len(depths) - 1 else channels[i]
+            my_c_out = channels[i] if i == 0 else channels[i - 1]
+            u_blocks.append(UBlock(depths[i], feats_in, my_c_in, channels[i], my_c_out, upsample=i > 0, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
+        self.u_net = UNet(d_blocks, reversed(u_blocks))
+
+    def forward(self, input, sigma, mapping_cond=None, unet_cond=None):
+        c_noise = sigma.log() / 4
+        timestep_embed = self.timestep_embed(append_dims(c_noise, 1))
+        mapping_cond_embed = torch.zeros_like(timestep_embed) if mapping_cond is None else self.mapping_cond(mapping_cond)
+        mapping_out = self.mapping(timestep_embed + mapping_cond_embed)
+        cond = {'cond': mapping_out}
+        if unet_cond is not None:
+            input = torch.cat([input, unet_cond], dim=1)
+        input = self.proj_in(input)
+        input = self.u_net(input, cond)
+        input = self.proj_out(input)
+        return input
+        
+class Denoiser(nn.Module):
+    """A Karras et al. preconditioner for denoising diffusion models."""
+
+    def __init__(self, inner_model, sigma_data=1.):
+        super().__init__()
+        self.inner_model = inner_model
+        self.sigma_data = sigma_data
+
+    def get_scalings(self, sigma):
+        c_skip = self.sigma_data**2 / (sigma**2 + self.sigma_data**2)
+        c_out = sigma * self.sigma_data / (sigma**2 + self.sigma_data**2)**0.5
+        c_in = 1 / (sigma**2 + self.sigma_data**2)**0.5
+        return c_skip, c_out, c_in
+
+    def loss(self, input, noise, sigma, **kwargs):
+        c_skip, c_out, c_in = [append_dims(x, input.ndim) for x in self.get_scalings(sigma)]
+        noised_input = input + noise * append_dims(sigma, input.ndim)
+        model_output = self.inner_model(noised_input * c_in, sigma, **kwargs)
+        target = (input - c_skip * noised_input) / c_out
+        return (model_output - target).pow(2).flatten(1).mean(1)
+
+    def forward(self, input, sigma, **kwargs):
+        c_skip, c_out, c_in = [append_dims(x, input.ndim) for x in self.get_scalings(sigma)]
+        return self.inner_model(input * c_in, sigma, **kwargs) * c_out + input * c_skip

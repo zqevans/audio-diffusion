@@ -7,6 +7,7 @@ setup(
     author='Zach Evans',
     packages=find_packages(),    
     install_requires=[
+        'accelerate',
         'auraloss',
         'einops',
         'fairscale',
@@ -14,12 +15,14 @@ setup(
         'perceiver-pytorch',
         'prefigure',
         'pytorch_lightning', 
+        'scipy',
         'torch',
         'torchaudio',
+        'tqdm',
         'vector-quantize-pytorch',
         'wandb',
-        'jukebox @ git+https://github.com/drscotthawley/jukebox.git'
-        #'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git#egg=cached_conv'
-        #'udls @ git+https://github.com/caillonantoine/UDLS.git#egg=udls',
+        'jukebox @ git+https://github.com/drscotthawley/jukebox.git',
+        'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git',
+        'udls @ git+https://github.com/caillonantoine/UDLS.git',
     ],
 )

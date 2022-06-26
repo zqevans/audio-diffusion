@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from . import utils
+
 class ResidualBlock(nn.Module):
     def __init__(self, main, skip=None):
         super().__init__()
@@ -13,15 +15,53 @@ class ResidualBlock(nn.Module):
         return self.main(input) + self.skip(input)
 
 
-class Modulation1d(nn.Module):
-    def __init__(self, state, feats_in, c_out):
-        super().__init__()
-        self.state = state
-        self.layer = nn.Linear(feats_in, c_out * 2, bias=False)
+# Noise level (and other) conditioning
 
-    def forward(self, input):
-        scales, shifts = self.layer(self.state['cond']).chunk(2, dim=-1)
-        return torch.addcmul(shifts[..., None], input, scales[..., None] + 1)
+class ConditionedModule(nn.Module):
+    pass
+
+
+class UnconditionedModule(ConditionedModule):
+    def __init__(self, module):
+        self.module = module
+    
+    def forward(self, input, cond):
+        return self.module(input)
+
+
+class ConditionedSequential(nn.Sequential, ConditionedModule):
+    def forward(self, input, cond):
+        for module in self:
+            if isinstance(module, ConditionedModule):
+                input = module(input, cond)
+            else:
+                input = module(input)
+        return input
+
+
+class ConditionedResidualBlock(ConditionedModule):
+    def __init__(self, *main, skip=None):
+        super().__init__()
+        self.main = ConditionedSequential(*main)
+        self.skip = skip if skip else nn.Identity()
+
+    def forward(self, input, cond):
+        skip = self.skip(input, cond) if isinstance(self.skip, ConditionedModule) else self.skip(input)
+        return self.main(input, cond) + skip
+
+
+class AdaGN(ConditionedModule):
+    def __init__(self, feats_in, c_out, num_groups, eps=1e-5, cond_key='cond'):
+        super().__init__()
+        self.num_groups = num_groups
+        self.eps = eps
+        self.cond_key = cond_key
+        self.mapper = nn.Linear(feats_in, c_out * 2)
+
+    def forward(self, input, cond):
+        weight, bias = self.mapper(cond[self.cond_key]).chunk(2, dim=-1)
+        input = F.group_norm(input, self.num_groups, eps=self.eps)
+        return torch.addcmul(utils.append_dims(bias, input.ndim), input, utils.append_dims(weight, input.ndim) + 1)
 
 class ResConvBlock(ResidualBlock):
     def __init__(self, c_in, c_mid, c_out, is_last=False):
@@ -29,37 +69,36 @@ class ResConvBlock(ResidualBlock):
         super().__init__([
             nn.Conv1d(c_in, c_mid, 5, padding=2),
             nn.GroupNorm(1, c_mid),
-            nn.SiLU(inplace=True),
+            nn.GELU(),
             nn.Conv1d(c_mid, c_out, 5, padding=2),
             nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
-            nn.SiLU(inplace=True) if not is_last else nn.Identity(),
+            nn.GELU() if not is_last else nn.Identity(),
         ], skip)
 
-class ResModConvBlock(ResidualBlock):
-    def __init__(self, state, feats_in, c_in, c_mid, c_out, is_last=False):
-        skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
-        super().__init__([
-            nn.Conv1d(c_in, c_mid, 5, padding=2),
-            nn.GroupNorm(1, c_mid, affine=False),
-            Modulation1d(state, feats_in, c_mid),
-            nn.SiLU(inplace=True),
-            nn.Conv1d(c_mid, c_out, 5, padding=2),
-            nn.GroupNorm(
-                1, c_out, affine=False) if not is_last else nn.Identity(),
-            Modulation1d(state, feats_in,
-                         c_out) if not is_last else nn.Identity(),
-            nn.SiLU(inplace=True) if not is_last else nn.Identity(),
-        ], skip)
+class ResModConvBlock(ConditionedResidualBlock):
+    def __init__(self, feats_in, c_in, c_mid, c_out, group_size=32, dropout_rate=0.):
+        skip = None if c_in == c_out else nn.Conv2d(c_in, c_out, 1, bias=False)
+        super().__init__(
+            AdaGN(feats_in, c_in, max(1, c_in // group_size)),
+            nn.GELU(),
+            nn.Conv2d(c_in, c_mid, 3, padding=1),
+            nn.Dropout(dropout_rate, inplace=True),
+            AdaGN(feats_in, c_mid, max(1, c_mid // group_size)),
+            nn.GELU(),
+            nn.Conv2d(c_mid, c_out, 3, padding=1),
+            nn.Dropout(dropout_rate, inplace=True),
+            skip=skip)
 
 
 class SelfAttention1d(nn.Module):
-    def __init__(self, c_in, n_head=1):
+    def __init__(self, c_in, n_head=1, dropout_rate=0.):
         super().__init__()
         assert c_in % n_head == 0
         self.norm = nn.GroupNorm(1, c_in)
         self.n_head = n_head
         self.qkv_proj = nn.Conv1d(c_in, c_in * 3, 1)
         self.out_proj = nn.Conv1d(c_in, c_in, 1)
+        self.dropout = nn.Dropout(dropout_rate, inplace=True)
 
     def forward(self, input):
         n, c, s = input.shape
@@ -70,7 +109,28 @@ class SelfAttention1d(nn.Module):
         scale = k.shape[3]**-0.25
         att = ((q * scale) @ (k.transpose(2, 3) * scale)).softmax(3)
         y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
-        return input + self.out_proj(y)
+        return input + self.dropout(self.out_proj(y))
+
+class SelfAttentionMod1d(nn.Module):
+    def __init__(self, c_in, n_head, norm, dropout_rate=0.):
+        super().__init__()
+        assert c_in % n_head == 0
+        self.norm_in = norm(c_in)
+        self.n_head = n_head
+        self.qkv_proj = nn.Conv1d(c_in, c_in * 3, 1)
+        self.out_proj = nn.Conv1d(c_in, c_in, 1)
+        self.dropout = nn.Dropout(dropout_rate, inplace=True)
+
+    def forward(self, input):
+        n, c, s = input.shape
+        qkv = self.qkv_proj(self.norm(input))
+        qkv = qkv.view(
+            [n, self.n_head * 3, c // self.n_head, s]).transpose(2, 3)
+        q, k, v = qkv.chunk(3, dim=1)
+        scale = k.shape[3]**-0.25
+        att = ((q * scale) @ (k.transpose(2, 3) * scale)).softmax(3)
+        y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
+        return input + self.dropout(self.out_proj(y))
 
 
 class SkipBlock(nn.Module):
@@ -150,3 +210,64 @@ class Upsample1d(nn.Module):
         indices = torch.arange(x.shape[1], device=x.device)
         weight[indices, indices] = self.kernel.to(weight)
         return F.conv_transpose1d(x, weight, stride=2, padding=self.pad * 2 + 1)
+
+
+# U-Nets
+
+class DBlock(ConditionedSequential):
+    def __init__(self, n_layers, feats_in, c_in, c_mid, c_out, group_size=32, head_size=64, dropout_rate=0., downsample=False, self_attn=False):
+        modules = [Downsample1d()] if downsample else []
+        for i in range(n_layers):
+            my_c_in = c_in if i == 0 else c_mid
+            my_c_out = c_mid if i < n_layers - 1 else c_out
+            modules.append(ResModConvBlock(feats_in, my_c_in, c_mid, my_c_out, group_size, dropout_rate))
+            if self_attn:
+                norm = lambda c_in: AdaGN(feats_in, c_in, max(1, my_c_out // group_size))
+                modules.append(SelfAttentionMod1d(my_c_out, max(1, my_c_out // head_size), norm, dropout_rate))
+        super().__init__(*modules)
+
+
+class UBlock(ConditionedSequential):
+    def __init__(self, n_layers, feats_in, c_in, c_mid, c_out, group_size=32, head_size=64, dropout_rate=0., upsample=False, self_attn=False):
+        modules = []
+        for i in range(n_layers):
+            my_c_in = c_in if i == 0 else c_mid
+            my_c_out = c_mid if i < n_layers - 1 else c_out
+            modules.append(ResConvBlock(feats_in, my_c_in, c_mid, my_c_out, group_size, dropout_rate))
+            if self_attn:
+                norm = lambda c_in: AdaGN(feats_in, c_in, max(1, my_c_out // group_size))
+                modules.append(SelfAttentionMod1d(my_c_out, max(1, my_c_out // head_size), norm, dropout_rate))
+        if upsample:
+            modules.append(Upsample1d())
+        super().__init__(*modules)
+
+    def forward(self, input, cond, skip=None):
+        if skip is not None:
+            input = torch.cat([input, skip], dim=1)
+        return super().forward(input, cond)
+
+class MappingNet(nn.Sequential):
+    def __init__(self, feats_in, feats_out, n_layers=2):
+        layers = []
+        for i in range(n_layers):
+            layers.append(nn.Linear(feats_in if i == 0 else feats_out, feats_out))
+            layers.append(nn.GELU())
+        super().__init__(*layers)
+        for layer in self:
+            if isinstance(layer, nn.Linear):
+                nn.init.orthogonal_(layer.weight)
+
+class UNet(ConditionedModule):
+    def __init__(self, d_blocks, u_blocks):
+        super().__init__()
+        self.d_blocks = nn.ModuleList(d_blocks)
+        self.u_blocks = nn.ModuleList(u_blocks)
+
+    def forward(self, input, cond):
+        skips = []
+        for block in self.d_blocks:
+            input = block(input, cond)
+            skips.append(input)
+        for i, (block, skip) in enumerate(zip(self.u_blocks, reversed(skips))):
+            input = block(input, cond, skip if i > 0 else None)
+        return input
