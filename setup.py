@@ -19,6 +19,7 @@ setup(
         'torch',
         'torchaudio',
         'tqdm',
+        'transformers',
         'vector-quantize-pytorch',
         'wandb',
         'jukebox @ git+https://github.com/drscotthawley/jukebox.git',

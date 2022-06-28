@@ -6,6 +6,8 @@ import json
 import math
 from pathlib import Path
 
+from prefigure import get_all_args, push_wandb_config
+
 import accelerate
 import torch
 from torch import optim
@@ -21,44 +23,9 @@ from blocks import utils
 
 from diffusion import inference
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('--batch-size', type=int, default=64,
-                   help='the batch size')
-    p.add_argument('--demo-every', type=int, default=500,
-                   help='save a demo grid every this many steps')
-    p.add_argument('--evaluate-every', type=int, default=10000,
-                   help='save a demo grid every this many steps')
-    p.add_argument('--evaluate-n', type=int, default=2000,
-                   help='the number of samples to draw to evaluate')
-    p.add_argument('--lr', type=float, default=1e-4,
-                   help='the learning rate')
-    p.add_argument('--model-config', type=str, required=True,
-                   help='the model config')
-    p.add_argument('--n-to-sample', type=int, default=64,
-                   help='the number of images to sample for demo grids')
-    p.add_argument('--name', type=str, default='model',
-                   help='the name of the run')
-    p.add_argument('--num-workers', type=int, default=8,
-                   help='the number of data loader workers')
-    p.add_argument('--resume', type=str, 
-                   help='the checkpoint to resume from')
-    p.add_argument('--save-every', type=int, default=10000,
-                   help='save every this many steps')
-    p.add_argument('--start-method', type=str, default='spawn',
-                   choices=['fork', 'forkserver', 'spawn'],
-                   help='the multiprocessing start method')
-    p.add_argument('--train-set', type=str, required=True,
-                   help='the training set location')
-    p.add_argument('--wandb-entity', type=str,
-                   help='the wandb entity name')
-    p.add_argument('--wandb-group', type=str,
-                   help='the wandb group name')
-    p.add_argument('--wandb-project', type=str,
-                   help='the wandb project name (specify this to enable wandb)')
-    p.add_argument('--wandb-save-model', action='store_true',
-                   help='save model to wandb')
-    args = p.parse_args()
+def main():  
+    
+    args = get_all_args()
 
     mp.set_start_method(args.start_method)
 
@@ -96,7 +63,7 @@ def main():
     sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
 
-    train_set = SampleDataset([args.train_set], args)
+    train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True, drop_last=True)
 
