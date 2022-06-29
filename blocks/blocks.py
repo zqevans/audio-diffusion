@@ -77,15 +77,15 @@ class ResConvBlock(ResidualBlock):
 
 class ResModConvBlock(ConditionedResidualBlock):
     def __init__(self, feats_in, c_in, c_mid, c_out, group_size=32, dropout_rate=0.):
-        skip = None if c_in == c_out else nn.Conv2d(c_in, c_out, 1, bias=False)
+        skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
         super().__init__(
             AdaGN(feats_in, c_in, max(1, c_in // group_size)),
             nn.GELU(),
-            nn.Conv2d(c_in, c_mid, 3, padding=1),
+            nn.Conv1d(c_in, c_mid, 3, padding=1),
             nn.Dropout(dropout_rate, inplace=True),
             AdaGN(feats_in, c_mid, max(1, c_mid // group_size)),
             nn.GELU(),
-            nn.Conv2d(c_mid, c_out, 3, padding=1),
+            nn.Conv1d(c_mid, c_out, 3, padding=1),
             nn.Dropout(dropout_rate, inplace=True),
             skip=skip)
 
@@ -111,7 +111,7 @@ class SelfAttention1d(nn.Module):
         y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
         return input + self.dropout(self.out_proj(y))
 
-class SelfAttentionMod1d(nn.Module):
+class SelfAttentionMod1d(ConditionedModule):
     def __init__(self, c_in, n_head, norm, dropout_rate=0.):
         super().__init__()
         assert c_in % n_head == 0
@@ -119,18 +119,19 @@ class SelfAttentionMod1d(nn.Module):
         self.n_head = n_head
         self.qkv_proj = nn.Conv1d(c_in, c_in * 3, 1)
         self.out_proj = nn.Conv1d(c_in, c_in, 1)
-        self.dropout = nn.Dropout(dropout_rate, inplace=True)
+        self.dropout = nn.Dropout(dropout_rate)
 
-    def forward(self, input):
+    def forward(self, input, cond):
         n, c, s = input.shape
-        qkv = self.qkv_proj(self.norm(input))
+        qkv = self.qkv_proj(self.norm_in(input, cond))
         qkv = qkv.view(
             [n, self.n_head * 3, c // self.n_head, s]).transpose(2, 3)
         q, k, v = qkv.chunk(3, dim=1)
         scale = k.shape[3]**-0.25
         att = ((q * scale) @ (k.transpose(2, 3) * scale)).softmax(3)
+        att = self.dropout(att)
         y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
-        return input + self.dropout(self.out_proj(y))
+        return input + self.out_proj(y)
 
 
 class SkipBlock(nn.Module):
@@ -233,7 +234,7 @@ class UBlock(ConditionedSequential):
         for i in range(n_layers):
             my_c_in = c_in if i == 0 else c_mid
             my_c_out = c_mid if i < n_layers - 1 else c_out
-            modules.append(ResConvBlock(feats_in, my_c_in, c_mid, my_c_out, group_size, dropout_rate))
+            modules.append(ResModConvBlock(feats_in, my_c_in, c_mid, my_c_out, group_size, dropout_rate))
             if self_attn:
                 norm = lambda c_in: AdaGN(feats_in, c_in, max(1, my_c_out // group_size))
                 modules.append(SelfAttentionMod1d(my_c_out, max(1, my_c_out // head_size), norm, dropout_rate))

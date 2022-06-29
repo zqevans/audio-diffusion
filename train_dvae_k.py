@@ -6,7 +6,7 @@ import json
 import math
 from pathlib import Path
 
-from prefigure import get_all_args, push_wandb_config
+from prefigure.prefigure import get_all_args, push_wandb_config
 
 import accelerate
 import torch
@@ -46,7 +46,7 @@ def main():
         model_config['channels'],
         model_config['self_attn_depths'],
         dropout_rate=model_config['dropout_rate'],
-        mapping_cond_dim=9,
+        #mapping_cond_dim=9,
     )
     accelerator.print('Parameters:', utils.n_params(inner_model))
 

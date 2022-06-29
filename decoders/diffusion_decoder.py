@@ -116,10 +116,16 @@ class DiffusionAttnUnet1D(nn.Module):
             for param in self.net.parameters():
                 param *= 0.5
 
-    def forward(self, input, t, cond):
+    def forward(self, input, t, cond=None):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
-        return self.net(torch.cat([input, timestep_embed, cond], dim=1))
+        
+        inputs = [input, timestep_embed]
+
+        if cond is not None:
+            cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
+            inputs.append(cond)
+
+        return self.net(torch.cat(inputs, dim=1))
 
 
 class AudioDenoiserModel(nn.Module):
@@ -154,10 +160,13 @@ class AudioDenoiserModel(nn.Module):
             u_blocks.append(UBlock(depths[i], feats_in, my_c_in, channels[i], my_c_out, upsample=i > 0, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
         self.u_net = UNet(d_blocks, reversed(u_blocks))
 
-    def forward(self, input, sigma, mapping_cond=None, unet_cond=None):
-        c_noise = sigma.log() / 4
-        timestep_embed = self.timestep_embed(append_dims(c_noise, 1))
+    def forward(self, input, sigma, mapping_cond=None, unet_cond=None, log_sigma = True):
+        if log_sigma:
+            sigma = sigma.log() / 4
+        c_noise = sigma
+        timestep_embed = self.timestep_embed(append_dims(c_noise, 2))
         mapping_cond_embed = torch.zeros_like(timestep_embed) if mapping_cond is None else self.mapping_cond(mapping_cond)
+        
         mapping_out = self.mapping(timestep_embed + mapping_cond_embed)
         cond = {'cond': mapping_out}
         if unet_cond is not None:
