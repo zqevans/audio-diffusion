@@ -16,7 +16,7 @@ from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from einops import rearrange
+from einops import rearrange, repeat
 
 import torchaudio
 
@@ -50,7 +50,7 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, logits):
+def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
@@ -63,7 +63,7 @@ def sample(model, x, steps, eta, logits):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], unet_cond=logits, log_sigma=False).float()
+            v = model(x, ts * t[i], mapping_cond=mapping_cond, unet_cond=unet_cond, log_sigma=False).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -115,8 +115,8 @@ class DiffusionDVAE(pl.LightningModule):
             model_config['channels'],
             model_config['self_attn_depths'],
             dropout_rate=model_config['dropout_rate'],
-            unet_cond_dim=global_args.latent_dim
-            #mapping_cond_dim=9,
+            unet_cond_dim=global_args.latent_dim,
+            mapping_cond_dim=global_args.latent_dim,
         )
         self.diffusion_ema = deepcopy(self.diffusion)
 
@@ -180,23 +180,28 @@ class DiffusionDVAE(pl.LightningModule):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            tokens = self.encoder(encoder_input).float()
+            latents = self.encoder(encoder_input).float()
 
         if self.num_quantizers > 0:
             #Rearrange for Memcodes
-            tokens = rearrange(tokens, 'b d n -> b n d')
+            latents = rearrange(latents, 'b d n -> b n d')
 
             #Quantize into memcodes
-            tokens, _ = self.quantizer(tokens)
+            latents, _ = self.quantizer(latents)
 
-            tokens = rearrange(tokens, 'b n d -> b d n')
+            latents = rearrange(latents, 'b n d -> b d n')
+
+        latent_mean = latents.mean(dim=-1)
+
+        #Calculate latent residuals
+        latents = latents - repeat(latent_mean, 'b d -> b d n', n = latents.shape[2])
 
         # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
         # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
 
-        tokens = F.interpolate(tokens, (noised_reals.shape[2], ), mode='linear', align_corners=False)
+        latents_interp = F.interpolate(latents, (noised_reals.shape[2], ), mode='linear', align_corners=False)
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, unet_cond=tokens, log_sigma=False)
+            v = self.diffusion(noised_reals, t, mapping_cond = latent_mean, unet_cond=latents_interp, log_sigma=False)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -260,25 +265,28 @@ class DemoCallback(pl.Callback):
 
         with torch.no_grad():
 
-            tokens = module.encoder_ema(encoder_input)
+            latents = module.encoder_ema(encoder_input)
 
             if self.quantized:
 
                 #Rearrange for Memcodes
-                tokens = rearrange(tokens, 'b d n -> b n d')
+                latents = rearrange(latents, 'b d n -> b n d')
 
-                tokens, _= module.quantizer_ema(tokens)
-                tokens = rearrange(tokens, 'b n d -> b d n')
+                latents, _= module.quantizer_ema(latents)
+                latents = rearrange(latents, 'b n d -> b d n')
 
-            tokens = F.interpolate(tokens, (demo_reals.shape[2], ), mode='linear', align_corners=False)
+            latent_mean = latents.mean(dim=-1)
 
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
+            #Calculate latent residuals
+            latents = latents - repeat(latent_mean, 'b d -> b d n', n = latents.shape[2])
+
+            latents_interp = F.interpolate(latents, (demo_reals.shape[2], ), mode='linear', align_corners=False)
+
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, mapping_cond=latent_mean, unet_cond=latents_interp)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
         demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
-
-        #demo_audio = torch.cat([demo_reals, fakes], -1)
 
         try:
             log_dict = {}
@@ -299,10 +307,10 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
 
-            log_dict[f'embeddings'] = embeddings_table(tokens)
+            log_dict[f'embeddings'] = embeddings_table(latents)
 
-            log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
-            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(tokens))
+            log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
+            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
 
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
@@ -336,8 +344,7 @@ def main():
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        #devices= args.num_gpus,
-        #num_nodes = args.num_nodes,
+        num_nodes = args.num_nodes,
         strategy='ddp',
         precision=16,
         accumulate_grad_batches=args.accum_batches, 
