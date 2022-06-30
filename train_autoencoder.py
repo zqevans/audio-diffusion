@@ -52,9 +52,9 @@ class AudioAutoencoder(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=0)
+        self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=depth)
        # self.encoder_ema = deepcopy(self.encoder)
-        self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=0)
+        self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=depth)
       #  self.decoder_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -103,14 +103,12 @@ class AudioAutoencoder(pl.LightningModule):
             if self.pqmf_bands > 1:
                 decoded = self.pqmf.inverse(decoded)
 
-            #mse_loss = F.mse_loss(reals, decoded)
             mrstft_loss = self.mrstft(reals, decoded)
             loss = mrstft_loss + mb_distance
 
         log_dict = {
             'train/loss': loss.detach(),
             'mb_distance': mb_distance.detach(),
-            #'train/mse_loss': mse_loss.detach(),
             'train/mrstft_loss': mrstft_loss.detach(),
         }
 
