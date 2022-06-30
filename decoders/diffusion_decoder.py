@@ -49,9 +49,10 @@ class DiffusionResConvUnet(nn.Module):
 
 class DiffusionAttnUnet1D(nn.Module):
     def __init__(
-        self, 
+        self,
         global_args, 
         io_channels = 2, 
+        cond_channels = 0,
         depth=14, 
         n_attn_layers = 6,
         c_mults = [128, 128, 256, 256] + [512] * 10
@@ -101,7 +102,7 @@ class DiffusionAttnUnet1D(nn.Module):
                 )
             else:
                 block = nn.Sequential(
-                    conv_block(io_channels + 16 + global_args.latent_dim, c, c),
+                    conv_block(io_channels + 16 + cond_channels, c, c),
                     conv_block(c, c, c),
                     conv_block(c, c, c),
                     block,
@@ -115,7 +116,13 @@ class DiffusionAttnUnet1D(nn.Module):
             for param in self.net.parameters():
                 param *= 0.5
 
-    def forward(self, input, t, cond):
+    def forward(self, input, t, cond=None):
         timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
-        cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
-        return self.net(torch.cat([input, timestep_embed, cond], dim=1))
+
+        inputs = [input, timestep_embed]
+        
+        if cond is not None:
+            cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
+            inputs.append(cond)
+
+        return self.net(torch.cat(inputs, dim=1))

@@ -22,6 +22,8 @@ class AttnResEncoder1D(nn.Module):
         max_depth = 12
         depth = min(depth, max_depth)
                 
+        self.depth = depth
+
         self.act = torch.tanh
         
         c_mults = c_mults[:depth]
