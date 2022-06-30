@@ -83,7 +83,7 @@ class AttnResEncoder1D(nn.Module):
 class GlobalEncoder(nn.Sequential):
     def __init__(self, latent_size, io_channels):
         c_in = io_channels
-        c_mults = [64, 64, 128, 128] + [latent_size] * 10
+        c_mults = [128, 128] + [latent_size] * 12
         layers = []
         c_mult_prev = c_in
         for i, c_mult in enumerate(c_mults):
@@ -92,7 +92,7 @@ class GlobalEncoder(nn.Sequential):
             layers.append(ResConvBlock(
                 c_mult, c_mult, c_mult, is_last=is_last))
             if not is_last:
-                layers.append(nn.AvgPool1d(2))
+                layers.append(Downsample1d())
             else:
                 layers.append(nn.AdaptiveAvgPool1d(1))
                 layers.append(nn.Flatten())
