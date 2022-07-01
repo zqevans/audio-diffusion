@@ -6,26 +6,23 @@ import math
 
 import sys
 import torch
-from torch import optim, nn
+from torch import optim
 from torch.nn import functional as F
 from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from einops import rearrange
-import numpy as np
+
 import torchaudio
 
 import auraloss
 
 import wandb
 
-from dataset.dataset import DBDataset
-
+from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from autoencoders.models import AttnResEncoder1D, AttnResDecoder1D
-
-from diffusion.utils import PadCrop, Stereo
 
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -213,11 +210,7 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = DBDataset(
-        args.preprocessed_dir,
-        [args.training_dir],
-        args
-    )
+    train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
