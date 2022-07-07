@@ -79,7 +79,7 @@ class SampleDataset(torch.utils.data.Dataset):
       print(f"Caching {n} input audio files:")
       wrapper = partial(self.load_file_ind, self.filenames)
       start, stop = self.get_data_range()
-      with Pool(processes=cpu_count()//8) as p:   # //8 to avoid FS bottleneck and/or too many processes (b/c * num_gpus)
+      with Pool(processes=cpu_count()) as p:   # //8 to avoid FS bottleneck and/or too many processes (b/c * num_gpus)
         self.audio_files = list(tqdm.tqdm(p.imap(wrapper, range(start,stop)), total=stop-start))
 
   def __len__(self):

@@ -11,6 +11,7 @@ setup(
         'einops',
         'fairscale',
         'nwt-pytorch',
+        'pandas',
         'perceiver-pytorch',
         'prefigure',
         'pytorch_lightning', 

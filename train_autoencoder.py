@@ -20,7 +20,7 @@ import auraloss
 
 import wandb
 
-from dataset.dataset import DBDataset
+from dataset.dataset import DBDataset, SampleDataset
 
 from diffusion.pqmf import CachedPQMF as PQMF
 from autoencoders.models import AttnResEncoder1D, AttnResDecoder1D
@@ -47,7 +47,7 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 class AudioAutoencoder(pl.LightningModule):
-    def __init__(self, global_args, depth=8):
+    def __init__(self, global_args, depth=8, n_attn_layers = 0):
         super().__init__()
 
         self.pqmf_bands = global_args.pqmf_bands
@@ -55,9 +55,9 @@ class AudioAutoencoder(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=depth)
+        self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=n_attn_layers)
        # self.encoder_ema = deepcopy(self.encoder)
-        self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=depth)
+        self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=n_attn_layers)
       #  self.decoder_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -128,7 +128,6 @@ class DemoCallback(pl.Callback):
         super().__init__()
         self.demo_every = global_args.demo_every
         self.demo_samples = global_args.sample_size
-        self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
         self.pqmf_bands = global_args.pqmf_bands
@@ -213,11 +212,15 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = DBDataset(
-        args.preprocessed_dir,
-        [args.training_dir],
-        args
-    )
+    if args.preprocessed_dir != "":
+        train_set = DBDataset(
+            args.preprocessed_dir,
+            [args.training_dir],
+            args
+        )
+    else:
+        train_set = SampleDataset([args.training_dir], args)
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
@@ -226,7 +229,9 @@ def main():
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
-    model = AudioAutoencoder(args, depth=6)
+
+    model = AudioAutoencoder(args, depth=args.depth, n_attn_layers=args.n_attn_layers)
+
     wandb_logger.watch(model)
     push_wandb_config(wandb_logger, args)
 
