@@ -12,7 +12,7 @@ class AttnResEncoder1D(nn.Module):
         latent_dim=256,
         depth=8, 
         n_attn_layers = 5, 
-        c_mults = [128, 256, 512, 1024, 1024, 1024, 1024, 1024]
+        c_mults = [256, 512, 1024, 1024, 1024, 1024, 1024, 1024]
     ):
         super().__init__()
 
@@ -80,7 +80,7 @@ class AttnResDecoder1D(nn.Module):
         latent_dim=256,
         depth=8, 
         n_attn_layers = 5, 
-        c_mults = [128, 256, 512, 1024, 1024, 1024, 1024, 1024]
+        c_mults = [256, 512, 1024, 1024, 1024, 1024, 1024, 1024]
     ):
         super().__init__()
 

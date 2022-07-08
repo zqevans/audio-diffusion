@@ -6,23 +6,28 @@ import math
 
 import sys
 import torch
-from torch import optim
+from torch import optim, nn
 from torch.nn import functional as F
 from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from einops import rearrange
-
+import numpy as np
 import torchaudio
 
 import auraloss
 
 import wandb
 
-from dataset.dataset import SampleDataset
+from dataset.dataset import DBDataset, SampleDataset
+
 from diffusion.pqmf import CachedPQMF as PQMF
 from autoencoders.models import AttnResEncoder1D, AttnResDecoder1D
+
+from diffusion.utils import PadCrop, Stereo
+
+from vector_quantize_pytorch import ResidualVQ
 
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -43,8 +48,10 @@ def alpha_sigma_to_t(alpha, sigma):
     the noise."""
     return torch.atan2(sigma, alpha) / math.pi * 2
 
+LAMBDA_QUANTIZER = 10
+
 class AudioAutoencoder(pl.LightningModule):
-    def __init__(self, global_args, depth=8):
+    def __init__(self, global_args, depth=8, n_attn_layers = 0):
         super().__init__()
 
         self.pqmf_bands = global_args.pqmf_bands
@@ -52,9 +59,11 @@ class AudioAutoencoder(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=depth)
+        c_mults = [512] * depth
+
+        self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=n_attn_layers, c_mults = c_mults)
        # self.encoder_ema = deepcopy(self.encoder)
-        self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=depth)
+        self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=n_attn_layers, c_mults = c_mults)
       #  self.decoder_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -69,19 +78,20 @@ class AudioAutoencoder(pl.LightningModule):
 
         self.mrstft = auraloss.freq.MultiResolutionSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths, w_log_mag=1.0, w_lin_mag=1.0)
 
-    # def encode(self, *args, **kwargs):
-    #     if self.training:
-    #         return self.encoder(*args, **kwargs)
-    #     return self.encoder_ema(*args, **kwargs)
-
-    # def decode(self, *args, **kwargs):
-    #     if self.training:
-    #         return self.decoder(*args, **kwargs)
-    #     return self.decoder_ema(*args, **kwargs)
-
+        self.num_quantizers = global_args.num_quantizers
+        
+        self.quantizer = ResidualVQ(
+            dim=global_args.latent_dim,
+            codebook_size=global_args.codebook_size,
+            num_quantizers = global_args.num_quantizers,
+            kmeans_init = True,
+            kmeans_iters = 100,
+            threshold_ema_dead_code = 2,
+            use_cosine_sim = True
+        )
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=4e-5)
+        return optim.Adam([*self.encoder.parameters(), *self.quantizer.parameters(), *self.decoder.parameters()], lr=4e-5)
   
     def training_step(self, batch):
         reals = batch[0]
@@ -94,23 +104,42 @@ class AudioAutoencoder(pl.LightningModule):
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
             latents = self.encoder(encoder_input).float()
-            decoded = self.decoder(latents)
+
+            tokens = rearrange(latents, 'b d n -> b n d')
+
+            tokens, _, quantizer_losses = self.quantizer(tokens)
+
+            tokens = rearrange(tokens, 'b n d -> b d n')
+
+            decoded = self.decoder(tokens)
 
             #Add pre-PQMF loss
 
-            mb_distance = self.mrstft(encoder_input, decoded)
-
             if self.pqmf_bands > 1:
+                mb_distance = self.mrstft(encoder_input, decoded)
                 decoded = self.pqmf.inverse(decoded)
 
             mrstft_loss = self.mrstft(reals, decoded)
-            loss = mrstft_loss + mb_distance
+            
+            if self.num_quantizers > 1:
+                #Sum the losses from the different codebooks
+                quantizer_loss = quantizer_losses.sum(dim=-1)
+
+            quantizer_loss = LAMBDA_QUANTIZER * quantizer_loss
+
+            loss = mrstft_loss + quantizer_loss
+
+            if self.pqmf_bands > 1:
+                loss += mb_distance 
 
         log_dict = {
             'train/loss': loss.detach(),
-            'mb_distance': mb_distance.detach(),
+            'quantizer_loss': quantizer_loss.detach(),
             'train/mrstft_loss': mrstft_loss.detach(),
         }
+
+        if self.pqmf_bands > 1:
+            log_dict["mb_distance"] = mb_distance.detach()
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return loss
@@ -125,7 +154,6 @@ class DemoCallback(pl.Callback):
         super().__init__()
         self.demo_every = global_args.demo_every
         self.demo_samples = global_args.sample_size
-        self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
         self.pqmf_bands = global_args.pqmf_bands
@@ -135,13 +163,13 @@ class DemoCallback(pl.Callback):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_epoch_end(self, trainer, module):
-        #last_demo_step = -1
-        #if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
-        if trainer.current_epoch % self.demo_every != 0:
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):
+        last_demo_step = -1
+        if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+        #if trainer.global_step % self.demo_every != 0:
             return
         
-        #last_demo_step = trainer.global_step
+        last_demo_step = trainer.global_step
 
         demo_reals, _ = next(self.demo_dl)
 
@@ -156,8 +184,13 @@ class DemoCallback(pl.Callback):
 
         with torch.no_grad():
 
-            tokens = module.encoder(encoder_input)
+            latents = module.encoder(encoder_input)
 
+            tokens = rearrange(latents, 'b d n -> b n d')
+
+            tokens, _, _ = module.quantizer(tokens)
+
+            tokens = rearrange(tokens, 'b n d -> b d n')
             fakes = module.decoder(tokens)
 
             if self.pqmf_bands > 1:
@@ -210,7 +243,15 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SampleDataset([args.training_dir], args)
+    if args.preprocessed_dir != "":
+        train_set = DBDataset(
+            args.preprocessed_dir,
+            [args.training_dir],
+            args
+        )
+    else:
+        train_set = SampleDataset([args.training_dir], args)
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
@@ -219,7 +260,9 @@ def main():
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
-    model = AudioAutoencoder(args, depth=6)
+
+    model = AudioAutoencoder(args, depth=args.depth, n_attn_layers=args.n_attn_layers)
+
     wandb_logger.watch(model)
     push_wandb_config(wandb_logger, args)
 

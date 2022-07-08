@@ -84,7 +84,7 @@ class AudioAutoencoder(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=4e-5)
+        return optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=4e-4)
   
     def training_step(self, batch):
         reals = batch[0]
@@ -137,13 +137,14 @@ class DemoCallback(pl.Callback):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_epoch_end(self, trainer, module):
-        #last_demo_step = -1
-        #if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
-        if trainer.current_epoch % self.demo_every != 0:
+    #def on_train_epoch_end(self, trainer, module):
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):        
+        last_demo_step = -1
+        if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+        #if trainer.current_epoch % self.demo_every != 0:
             return
         
-        #last_demo_step = trainer.global_step
+        last_demo_step = trainer.global_step
 
         demo_reals, _ = next(self.demo_dl)
 

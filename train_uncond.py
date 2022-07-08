@@ -16,14 +16,13 @@ import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from einops import rearrange
 
+from diffusion.pqmf import CachedPQMF as PQMF
 import torchaudio
 
 import wandb
 
 from dataset.dataset import SampleDataset
 
-from nwt_pytorch import Memcodes
-from dvae.residual_memcodes import ResidualMemcodes
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
@@ -91,7 +90,12 @@ class DiffusionUncond(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=5)
+        self.pqmf_bands = global_args.pqmf_bands
+
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+
+        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, n_attn_layers=4)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -101,6 +105,10 @@ class DiffusionUncond(pl.LightningModule):
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
+
+        
+        if self.pqmf_bands > 1:
+            reals = self.pqmf(reals)
 
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -145,23 +153,36 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.sample_rate = global_args.sample_rate
+        self.pqmf_bands = global_args.pqmf_bands
+
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_epoch_end(self, trainer, module):
-        #last_demo_step = -1
-        #if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
-        if trainer.current_epoch % self.demo_every != 0:
+    #def on_train_epoch_end(self, trainer, module):
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):        
+        last_demo_step = -1
+        if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+        #if trainer.current_epoch % self.demo_every != 0:
             return
         
-        noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
-
-        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1)
-
-        # Put the demos together
-        fakes = rearrange(fakes, 'b d n -> d (b n)')
+        last_demo_step = trainer.global_step
+        
+        if self.pqmf_bands > 1:
+            noise = torch.randn([self.num_demos, 2*self.pqmf_bands, self.demo_samples//self.pqmf_bands]).to(module.device)
+        else:
+            noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
 
         try:
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1)
+
+            if self.pqmf_bands > 1:
+                fakes = self.pqmf.inverse(fakes.cpu())
+
+            # Put the demos together
+            fakes = rearrange(fakes, 'b d n -> d (b n)')
+
             log_dict = {}
             
             filename = f'demo_{trainer.global_step:08}.wav'
