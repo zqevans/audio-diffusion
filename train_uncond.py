@@ -95,7 +95,7 @@ class DiffusionUncond(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, n_attn_layers=4)
+        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, n_attn_layers=5)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay

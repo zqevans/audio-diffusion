@@ -89,7 +89,7 @@ def sample(model, x, steps, eta, logits):
 
 
 
-class DiffusionDVAE(pl.LightningModule):
+class DiffusionInpaint(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
@@ -98,54 +98,27 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=9, n_attn_layers=0)
-        self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=0, c_mults=[128, 256, 256] + [512]*12, depth=12)
+        inpaint_start_ratio = 0.75
+
+        self.inpaint_start_sample = int(global_args.sample_size * inpaint_start_ratio)
+
+        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=6, c_mults=[256]*2 + [512]*12, depth=14)
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.ema_decay = global_args.ema_decay
-        
-        self.num_quantizers = global_args.num_quantizers
-        if self.num_quantizers > 0:
-            quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
-            
-            quantizer_kwargs = {}
-            if global_args.num_quantizers > 1:
-                quantizer_kwargs["num_quantizers"] = global_args.num_quantizers
+        self.ema_decay = global_args.ema_decay        
 
-            self.quantizer = quantizer_class(
-                dim=global_args.latent_dim,
-                heads=global_args.num_heads,
-                num_codes=global_args.codebook_size,
-                temperature=1.,
-                **quantizer_kwargs
-            )
-
-            self.quantizer_ema = deepcopy(self.quantizer)
-
-        
-
-    def encode(self, *args, **kwargs):
-        if self.training:
-            return self.encoder(*args, **kwargs)
-        return self.encoder_ema(*args, **kwargs)
-
-    def decode(self, *args, **kwargs):
-        if self.training:
-            return self.diffusion(*args, **kwargs)
-        return self.diffusion_ema(*args, **kwargs)
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=4e-5)
+        return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
 
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
 
-        encoder_input = reals
+        # TODO: Make masked reals for conditioning
+        cond = reals.clone()
 
-        if self.pqmf_bands > 1:
-            encoder_input = self.pqmf(reals)
+        cond[:,:,self.inpaint_start_sample:] = 0
         
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -160,24 +133,8 @@ class DiffusionDVAE(pl.LightningModule):
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
 
-        # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            tokens = self.encoder(encoder_input).float()
-
-        if self.num_quantizers > 0:
-            #Rearrange for Memcodes
-            tokens = rearrange(tokens, 'b d n -> b n d')
-
-            #Quantize into memcodes
-            tokens, _ = self.quantizer(tokens)
-
-            tokens = rearrange(tokens, 'b n d -> b d n')
-
-        # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
-        # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
-
-        with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, tokens)
+            v = self.diffusion(noised_reals, t, cond)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -192,10 +149,7 @@ class DiffusionDVAE(pl.LightningModule):
     def on_before_zero_grad(self, *args, **kwargs):
         decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         ema_update(self.diffusion, self.diffusion_ema, decay)
-        ema_update(self.encoder, self.encoder_ema, decay)
 
-        if self.num_quantizers > 0:
-            ema_update(self.quantizer, self.quantizer_ema, decay)
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -229,30 +183,15 @@ class DemoCallback(pl.Callback):
 
         demo_reals, _ = next(self.demo_dl)
 
-        encoder_input = demo_reals
-        
-        if self.pqmf_bands > 1:
-            encoder_input = self.pqmf(demo_reals)
-        
-        encoder_input = encoder_input.to(module.device)
-
         demo_reals = demo_reals.to(module.device)
 
+        cond = demo_reals.clone()
+
+        cond[:,:,module.inpaint_start_sample:] = 0
+
         noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
-
-        with torch.no_grad():
-
-            tokens = module.encoder_ema(encoder_input)
-
-            if self.quantized:
-
-                #Rearrange for Memcodes
-                tokens = rearrange(tokens, 'b d n -> b n d')
-
-                tokens, _= module.quantizer_ema(tokens)
-                tokens = rearrange(tokens, 'b n d -> b d n')
-
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
+      
+        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, cond)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -279,11 +218,6 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
 
-            log_dict[f'embeddings'] = embeddings_table(tokens)
-
-            log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
-            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(tokens))
-
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
 
@@ -300,6 +234,8 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
+    args.latent_dim = 2
+
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
@@ -309,7 +245,7 @@ def main():
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
-    diffusion_model = DiffusionDVAE(args)
+    diffusion_model = DiffusionInpaint(args)
     wandb_logger.watch(diffusion_model)
     push_wandb_config(wandb_logger, args)
 

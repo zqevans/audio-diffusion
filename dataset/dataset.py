@@ -18,10 +18,10 @@ class SampleDataset(torch.utils.data.Dataset):
   def __init__(self, paths, global_args):
     super().__init__()
     self.filenames = []
-
+    print(f"Random crop: {global_args.random_crop}")
     self.augs = torch.nn.Sequential(
       PadCrop(global_args.sample_size, randomize=global_args.random_crop),
-      RandomGain(0.7, 1.0),
+      #RandomGain(0.7, 1.0),
       #NormInputs(do_norm=global_args.norm_inputs),
       #OneMinus(), # this is crazy, reverse the signal rel. to +/-1
       #RandPool(),

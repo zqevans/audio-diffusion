@@ -24,12 +24,14 @@ import wandb
 
 from dataset.dataset import DBDataset, SampleDataset
 
+from losses.time_losses import MultiScalePQMFLoss
+
 from diffusion.pqmf import CachedPQMF as PQMF
 from autoencoders.models import AttnResEncoder1D, AttnResDecoder1D
 
 from diffusion.utils import PadCrop, Stereo
 
-from blocks.residual_vq import ResidualVQ
+from nwt_pytorch import Memcodes
 
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -52,6 +54,9 @@ def alpha_sigma_to_t(alpha, sigma):
 
 LAMBDA_QUANTIZER = 1
 
+# PQMF stopband attenuation
+PQMF_ATTN = 100
+
 class AudioAutoencoder(pl.LightningModule):
     def __init__(self, global_args, depth=8, n_attn_layers = 0):
         super().__init__()
@@ -59,16 +64,16 @@ class AudioAutoencoder(pl.LightningModule):
         self.pqmf_bands = global_args.pqmf_bands
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, PQMF_ATTN, global_args.pqmf_bands)
 
         #c_mults = [512] * depth
 
-        c_mults = [128, 256, 256] + [512] * (depth-3)
+        c_mults = [128, 128, 256] + [512] * (depth-3)
 
         self.encoder = AttnResEncoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=n_attn_layers, c_mults = c_mults)
-       # self.encoder_ema = deepcopy(self.encoder)
+       
         self.decoder = AttnResDecoder1D(n_io_channels=2*global_args.pqmf_bands, latent_dim=global_args.latent_dim, depth=depth, n_attn_layers=n_attn_layers, c_mults = c_mults)
-      #  self.decoder_ema = deepcopy(self.diffusion)
+      
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
         
@@ -83,19 +88,19 @@ class AudioAutoencoder(pl.LightningModule):
         self.mrstft = auraloss.freq.MultiResolutionSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths, w_log_mag=1.0, w_lin_mag=1.0)
         self.sdstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
 
+        self.aw_fir = auraloss.perceptual.FIRFilter(filter_type="aw", fs=global_args.sample_rate)
+
         self.num_quantizers = global_args.num_quantizers
         
-        self.quantizer = ResidualVQ(
+        self.quantizer = Memcodes(
             dim=global_args.latent_dim,
-            codebook_size=global_args.codebook_size,
-            num_quantizers = global_args.num_quantizers,
-            kmeans_init = True,
-            kmeans_iters = 100,
-            threshold_ema_dead_code = 2
+            heads=global_args.num_heads,
+            num_codes=global_args.codebook_size,
+            temperature=1.
         )
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.quantizer.parameters(), *self.decoder.parameters()], lr=4e-5)
+        return optim.Adam([*self.encoder.parameters(), *self.quantizer.parameters(), *self.decoder.parameters()], lr=4e-4)
   
     def training_step(self, batch):
 
@@ -117,7 +122,7 @@ class AudioAutoencoder(pl.LightningModule):
 
             tokens = rearrange(latents, 'b d n -> b n d')
 
-            tokens, _, quantizer_losses = self.quantizer(tokens)
+            tokens, _ = self.quantizer(tokens)
         
             tokens = rearrange(tokens, 'b n d -> b d n')
 
@@ -130,31 +135,36 @@ class AudioAutoencoder(pl.LightningModule):
             #Add pre-PQMF loss
 
             if self.pqmf_bands > 1:
+
+                # Multi-scale STFT loss on the PQMF for multiband harmonic content
                 mb_distance = self.mrstft(encoder_input, decoded)
                 p.tick("mb_distance")
+
+            
                 decoded = self.pqmf.inverse(decoded)
                 p.tick("pqmf_inverse")
 
+          
+            # aw_mse_loss_l = torch.nn.functional.mse_loss(self.aw_fir(reals[:, 0, :], decoded[:, 0, :]))
+            # aw_mse_loss_r = torch.nn.functional.mse_loss(self.aw_fir(reals[:, 1, :], decoded[:, 1, :]))
+            # aw_mse_loss = aw_mse_loss_l + aw_mse_loss_r
+            # p.tick("aw_mse_loss")
+
+            # Multi-scale mid-side STFT loss for stereo/harmonic information
             mrstft_loss = self.sdstft(reals, decoded)
             p.tick("fb_distance")
             
-            if self.num_quantizers > 1:
-                #Sum the losses from the different codebooks
-                quantizer_loss = quantizer_losses.sum(dim=-1)
-
-            quantizer_loss = LAMBDA_QUANTIZER * quantizer_loss
-
-            loss = mrstft_loss + quantizer_loss
+            loss = mrstft_loss #+ aw_mse_loss
 
             if self.pqmf_bands > 1:
-                loss += mb_distance 
+                loss += mb_distance
 
 
-            print(p)
+            #print(p)
         log_dict = {
             'train/loss': loss.detach(),
-            'quantizer_loss': quantizer_loss.detach(),
             'train/mrstft_loss': mrstft_loss.detach(),
+            #'train/aw_mse_loss': aw_mse_loss.detach(),
         }
 
         if self.pqmf_bands > 1:
@@ -178,7 +188,7 @@ class DemoCallback(pl.Callback):
         self.pqmf_bands = global_args.pqmf_bands
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, PQMF_ATTN, global_args.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
@@ -207,7 +217,7 @@ class DemoCallback(pl.Callback):
 
             tokens = rearrange(latents, 'b d n -> b n d')
 
-            tokens, _, _ = module.quantizer(tokens)
+            tokens, _ = module.quantizer(tokens)
 
             tokens = rearrange(tokens, 'b n d -> b d n')
             fakes = module.decoder(tokens)
@@ -301,5 +311,14 @@ def main():
     trainer.fit(model, train_dl, ckpt_path=args.ckpt_path)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except RuntimeError as err:
+        import requests
+        import datetime
+        ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id')
+        print(f'ERROR at {ts} on {resp.text}: {type(err).__name__}: {err}', flush=True)
+        raise err
+
 

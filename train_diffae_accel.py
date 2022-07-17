@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
 from prefigure.prefigure import get_all_args, push_wandb_config
-from contextlib import contextmanager
 from copy import deepcopy
 import math
-from pathlib import Path
 
 import json
 
@@ -25,11 +23,11 @@ import wandb
 from blocks import utils
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from encoders.encoders import AttnResEncoder1D, GlobalEncoder
+from encoders.encoders import AttnResEncoder1D
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
-from decoders.diffusion_decoder import AudioDenoiserModel
+from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -51,7 +49,7 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
+def sample(model, x, steps, eta, logits):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
@@ -64,7 +62,7 @@ def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], mapping_cond=mapping_cond, unet_cond=unet_cond, log_sigma=False).float()
+            v = model(x, ts * t[i], logits).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -96,33 +94,17 @@ class DiffusionDVAE(nn.Module):
     def __init__(self, global_args, device):
         super().__init__()
 
-        self.pqmf_bands = global_args.pqmf_bands
-
         self.device = device
+
+        self.pqmf_bands = global_args.pqmf_bands
 
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.global_encoder = GlobalEncoder(global_args.global_latent_dim, 2*global_args.pqmf_bands)
-
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=7, n_attn_layers=0, c_mults=[256, 256]*2 + [512] * 5)
-
-        model_config = json.load(open(global_args.model_config))
-  
-        
-        #size = model_config['input_size'] # Input size is determined by global_args.sample_size instead
-
-        self.diffusion = AudioDenoiserModel(
-            model_config['input_channels'],
-            model_config['mapping_out'],
-            model_config['depths'],
-            model_config['channels'],
-            model_config['self_attn_depths'],
-            dropout_rate=model_config['dropout_rate'],
-            unet_cond_dim=global_args.latent_dim,
-            mapping_cond_dim=global_args.global_latent_dim,
-        )
-
+        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=8, n_attn_layers=0)
+        self.encoder_ema = deepcopy(self.encoder)
+        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=6, c_mults=[128, 256] + [512]*12, depth=14)
+        self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
         
@@ -141,6 +123,8 @@ class DiffusionDVAE(nn.Module):
                 temperature=1.,
                 **quantizer_kwargs
             )
+
+            self.quantizer_ema = deepcopy(self.quantizer)
   
     def loss(self, reals):
 
@@ -164,8 +148,6 @@ class DiffusionDVAE(nn.Module):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            global_latent = self.global_encoder(encoder_input).float()
-            global_latent = F.normalize(global_latent, p=2, dim=-1)
             latents = self.encoder(encoder_input).float()
 
         if self.num_quantizers > 0:
@@ -180,10 +162,8 @@ class DiffusionDVAE(nn.Module):
         # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
         # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
 
-        latents_interp = F.interpolate(latents, (noised_reals.shape[2], ), mode='linear', align_corners=False)
-
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, mapping_cond = global_latent, unet_cond=latents_interp, log_sigma=False)
+            v = self.diffusion(noised_reals, t, latents)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -193,15 +173,15 @@ def main():
 
     args = get_all_args()
     
+    args.random_crop = False
+
+    torch.manual_seed(args.seed)
+
     try:
         mp.set_start_method(args.start_method)
     except RuntimeError:
         pass
-
-    torch.manual_seed(args.seed)
-
-    model_config = json.load(open(args.model_config))
-
+     
     accelerator = accelerate.Accelerator()
     device = accelerator.device
     print('Using device:', device, flush=True)
@@ -210,18 +190,15 @@ def main():
 
     accelerator.print('Parameters:', utils.n_params(diffusion_model))
 
-    
     # If logging to wandb, initialize the run
     use_wandb = accelerator.is_main_process and args.name
     if use_wandb:
         import wandb
         config = vars(args)
-        config['model_config'] = model_config
         config['params'] = utils.n_params(diffusion_model)
         wandb.init(project=args.name, config=config, save_code=True)
 
-
-    opt = optim.Adam([*diffusion_model.parameters()], lr=4e-5)
+    opt = optim.Adam([*diffusion_model.encoder.parameters(), *diffusion_model.diffusion.parameters()], lr=4e-5)
 
     sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
@@ -240,7 +217,6 @@ def main():
 
     if use_wandb:
         wandb.watch(diffusion_model)
-
         
     if args.ckpt_path:
         ckpt = torch.load(args.ckpt_path, map_location='cpu')
@@ -276,10 +252,8 @@ def main():
         noise = torch.randn([demo_reals.shape[0], 2, args.sample_size]).to(device)
 
         with torch.no_grad():
+
             latents = model_ema.encoder(encoder_input)
-            global_latent = model_ema.global_encoder(encoder_input)
-            global_latent = F.normalize(global_latent, p=2, dim=-1)
-            print(f'global latent norm: {global_latent.norm(p=2)}')
 
             if model_ema.num_quantizers > 0:
 
@@ -289,52 +263,49 @@ def main():
                 latents, _= model_ema.quantizer(latents)
                 latents = rearrange(latents, 'b n d -> b d n')
 
-
-            latents_interp = F.interpolate(latents, (demo_reals.shape[2], ), mode='linear', align_corners=False)
-
-            fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, mapping_cond=global_latent, unet_cond=latents_interp)
+            fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, latents)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
         demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
 
-        try:
-            log_dict = {}
-            
-            filename = f'recon_{step:08}.wav'
-            fakes = fakes.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            torchaudio.save(filename, fakes, args.sample_rate)
+        if use_wandb:
+            try:
+                log_dict = {}
+                
+                filename = f'recon_{step:08}.wav'
+                fakes = fakes.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                torchaudio.save(filename, fakes, args.sample_rate)
 
-            reals_filename = f'reals_{step:08}.wav'
-            demo_reals = demo_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-            torchaudio.save(reals_filename, demo_reals, args.sample_rate)
-
-
-            log_dict[f'recon'] = wandb.Audio(filename,
-                                                sample_rate=args.sample_rate,
-                                                caption=f'Reconstructed')
-            log_dict[f'real'] = wandb.Audio(reals_filename,
-                                                sample_rate=args.sample_rate,
-                                                caption=f'Real')
-
-            log_dict[f'embeddings'] = embeddings_table(latents)
-
-            log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
-            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
-            log_dict[f'embeddings_avg_spec'] = wandb.Image(tokens_spectrogram_image(repeat(global_latent, 'b d -> b d n', n = latents.shape[2]), title="Global latents"))
-
-            log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
-            log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
+                reals_filename = f'reals_{step:08}.wav'
+                demo_reals = demo_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                torchaudio.save(reals_filename, demo_reals, args.sample_rate)
 
 
-            wandb.log(log_dict, step=step)
-        except Exception as e:
-            print(f'{type(e).__name__}: {e}', file=sys.stderr)
+                log_dict[f'recon'] = wandb.Audio(filename,
+                                                    sample_rate=args.sample_rate,
+                                                    caption=f'Reconstructed')
+                log_dict[f'real'] = wandb.Audio(reals_filename,
+                                                    sample_rate=args.sample_rate,
+                                                    caption=f'Real')
+
+                log_dict[f'embeddings'] = embeddings_table(latents)
+
+                log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
+                log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
+
+                log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
+                log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
+
+
+                wandb.log(log_dict, step=step)
+            except Exception as e:
+                print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
     def save():
         accelerator.wait_for_everyone()
         filename = f'{args.name}_{step:08}.pth'
-        if accelerator.is_local_main_process:
+        if accelerator.is_main_process:
             tqdm.write(f'Saving to {filename}...')
         obj = {
             'model': accelerator.unwrap_model(diffusion_model).state_dict(),
@@ -346,12 +317,9 @@ def main():
             'step': step
         }
         accelerator.save(obj, filename)
-        if args.wandb_save_model and use_wandb:
-            wandb.save(filename)
-
     try:
         while True:
-            for batch in tqdm(train_dl, disable=not accelerator.is_local_main_process):
+            for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
                 opt.zero_grad()
                 loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
                 accelerator.backward(loss)
@@ -367,7 +335,7 @@ def main():
 
                 ema_sched.step()
 
-                if accelerator.is_local_main_process:
+                if accelerator.is_main_process:
                     if step % 25 == 0:
                         tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {loss.item():g}')
 
@@ -383,11 +351,18 @@ def main():
                     if step % args.demo_every == 0:
                         demo()
 
-                    if step > 0 and step % args.checkpoint_every == 0:
-                        save()
+                if step > 0 and step % args.checkpoint_every == 0:
+                    save()
 
                 step += 1
             epoch += 1
+    except RuntimeError as err:
+            import requests
+            import datetime
+            ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id')
+            print(f'ERROR at {ts} on {resp.text} {device}: {type(err).__name__}: {err}', flush=True)
+            raise err
     except KeyboardInterrupt:
         pass
 

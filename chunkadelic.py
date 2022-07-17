@@ -74,9 +74,11 @@ def process_one_file(filenames, args, file_ind):
     if new_filename is None:
         print(f"ERROR: Something went wrong with input file {filename}") 
         return 
-
-    audio = load_file(filename, sr=sr)
-    blow_chunks(audio, new_filename, chunk_size, sr=sr, overlap=overlap)
+    try:
+        audio = load_file(filename, sr=sr)
+        blow_chunks(audio, new_filename, chunk_size, sr=sr, overlap=overlap)
+    except:
+        pass
     return
 
 
@@ -102,7 +104,7 @@ def main():
 
     print("Processing files (in parallel)")
     wrapper = partial(process_one_file, filenames, args)
-    r = process_map(wrapper, range(0, n), chunksize=1, max_workers=24)  # different chunksize used by tqdm. max_workers is to avoid annoying other ppl
+    r = process_map(wrapper, range(0, n), chunksize=1, max_workers=48)  # different chunksize used by tqdm. max_workers is to avoid annoying other ppl
 
     print("Finished")
 
