@@ -30,7 +30,12 @@ from diffusion.pqmf import CachedPQMF as PQMF
 from losses.adv_losses import StackDiscriminators
 
 from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
+
 from vector_quantize_pytorch import ResidualVQ
+
+from dvae.residual_memcodes import ResidualMemcodes
+
+from nwt_pytorch import Memcodes
 
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -71,15 +76,15 @@ class SoundStream(nn.Module):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, PQMF_ATTN, global_args.pqmf_bands)
 
-        capacity = 128
+        capacity = 64
 
-        # c_mults = [2, 4, 4, 4, 8, 16]
+        #c_mults = [2, 4, 8, 16]
         
-        # strides = [2, 2, 2, 4, 5, 8]
+        #strides = [2, 4, 5, 8]
 
-        c_mults = [2, 4, 8, 16]
+        c_mults = [4, 8, 16]
         
-        strides = [2, 2, 2, 2]
+        strides = [2, 5, 8]
 
         #self.loudness = Loudness(global_args.sample_rate, 512)
 
@@ -123,19 +128,35 @@ class SoundStream(nn.Module):
 
         self.num_quantizers = global_args.num_quantizers
         
-        self.quantizer = ResidualVQ(
-            dim=global_args.latent_dim,
-            codebook_size=global_args.codebook_size,
-            num_quantizers = global_args.num_quantizers,
-            kmeans_init = True,
-            kmeans_iters = 100,
-            threshold_ema_dead_code = 2,
-            use_cosine_sim = True,
-            sync_codebook = True
-            #orthogonal_reg_weight = 1,
-            # orthogonal_reg_active_codes_only = True,
-            # shared_codebook = True
-        )
+        # self.quantizer = ResidualVQ(
+        #     dim=global_args.latent_dim,
+        #     codebook_size=global_args.codebook_size,
+        #     num_quantizers = global_args.num_quantizers,
+        #     kmeans_init = True,
+        #     kmeans_iters = 100,
+        #     threshold_ema_dead_code = 2,
+        #     use_cosine_sim = True,
+        #     sync_codebook = True
+        #     #orthogonal_reg_weight = 1,
+        #     # orthogonal_reg_active_codes_only = True,
+        #     # shared_codebook = True
+        # )
+
+        self.num_quantizers = global_args.num_quantizers
+        if self.num_quantizers > 0:
+            quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
+            
+            quantizer_kwargs = {}
+            if global_args.num_quantizers > 1:
+                quantizer_kwargs["num_quantizers"] = global_args.num_quantizers
+
+            self.quantizer = quantizer_class(
+                dim=global_args.latent_dim,
+                heads=global_args.num_heads,
+                num_codes=global_args.codebook_size,
+                temperature=1.,
+                **quantizer_kwargs
+            )
 
         self.use_adv_losses = not global_args.skip_adv_losses
 
@@ -157,13 +178,14 @@ class SoundStream(nn.Module):
 
             tokens = rearrange(latents, 'b d n -> b n d')
 
-            tokens, _, quantizer_loss = self.quantizer(tokens)
+            tokens, _ = self.quantizer(tokens)
 
-            if self.num_quantizers > 0:
-                quantizer_loss = quantizer_loss.sum(dim=-1)
-                tokens = l2norm(tokens)
-        
             tokens = rearrange(tokens, 'b n d -> b d n')
+
+            # if self.num_quantizers > 0:
+            #     tokens /= self.num_quantizers
+            
+            tokens = l2norm(tokens)
 
             p.tick("quantizer")
 
@@ -200,7 +222,7 @@ class SoundStream(nn.Module):
                 loss_adv = torch.tensor(0.).to(self.device)
                 feature_dist = torch.tensor(0.).to(self.device)
 
-            gen_loss = mrstft_loss + loss_adv + feature_dist + quantizer_loss  #+ loud_dist
+            gen_loss = mrstft_loss + loss_adv + feature_dist #+ quantizer_loss  #+ loud_dist
 
             if self.pqmf_bands > 1:
                 gen_loss += mb_distance
@@ -210,7 +232,7 @@ class SoundStream(nn.Module):
         log_dict = {
             'train/loss': gen_loss.detach(),
             'train/mrstft_loss': mrstft_loss.detach(),
-            'quantizer_loss': quantizer_loss.detach(),
+            #'quantizer_loss': quantizer_loss.detach(),
             'adv_loss': loss_adv.detach(),
             'train/disc_loss': loss_disc.detach(),
             'train/feature_match_distance': feature_dist.detach(),
@@ -250,8 +272,8 @@ def main():
         config['params'] = utils.n_params(model)
         wandb.init(project=args.name, config=config, save_code=True)
 
-    opt_gen = optim.Adam([*model.encoder.parameters(), *model.quantizer.parameters(), *model.decoder.parameters()], lr=1e-4, betas=(.5, .9))
-    opt_disc = optim.Adam([*model.discriminator.parameters()], lr=1e-4, betas=(.5, .9))
+    opt_gen = optim.Adam([*model.encoder.parameters(), *model.quantizer.parameters(), *model.decoder.parameters()], lr=4e-5, betas=(.5, .9))
+    opt_disc = optim.Adam([*model.discriminator.parameters()], lr=4e-5, betas=(.5, .9))
     #ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
     #sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
 
@@ -287,7 +309,7 @@ def main():
 
 
     @torch.no_grad()
-    #@utils.eval_mode(model_ema)
+    @utils.eval_mode(model)
     def demo():
         demo_reals, _ = next(demo_dl)
 
@@ -306,11 +328,12 @@ def main():
 
             tokens = rearrange(latents, 'b d n -> b n d')
 
-            tokens, _, _ = model_unwrap.quantizer(tokens)
+            tokens, _ = model_unwrap.quantizer(tokens)
+
+            tokens = rearrange(tokens, 'b n d -> b d n')
 
             tokens = l2norm(tokens)
 
-            tokens = rearrange(tokens, 'b n d -> b d n')
             fakes = model_unwrap.decoder(tokens)
 
             if args.pqmf_bands > 1:
@@ -389,7 +412,7 @@ def main():
                     opt_gen.step()
 
                 #sched.step()
-               # ema_decay = ema_sched.get_value()
+                #ema_decay = ema_sched.get_value()
 
                 # utils.ema_update(
                 #     accelerator.unwrap_model(model), 

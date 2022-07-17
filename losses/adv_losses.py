@@ -82,7 +82,7 @@ class StackDiscriminators(nn.Module):
         pred_fake = 0
 
         for scale_true, scale_fake in zip(feature_true, feature_fake):
-            feature_matching_distance = feature_matching_distance + 10 * sum(
+            feature_matching_distance = feature_matching_distance + sum(
                 map(
                     lambda x, y: abs(x - y).mean(),
                     scale_true,
