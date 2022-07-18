@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from perceiver_pytorch import Perceiver
 
-from blocks.blocks import Downsample1d, SelfAttention1d, ResConvBlock
+from blocks.blocks import Downsample1d, SelfAttention1d, DilatedConvBlock
 
 class AttnResEncoder1D(nn.Module):
     def __init__(
@@ -27,7 +27,7 @@ class AttnResEncoder1D(nn.Module):
         c_mults = c_mults[:depth]
         downsamples = downsamples[:depth]
 
-        conv_block = ResConvBlock
+        conv_block = DilatedConvBlock
 
         attn_start_layer = depth - n_attn_layers - 1
 
@@ -88,8 +88,8 @@ class GlobalEncoder(nn.Sequential):
         c_mult_prev = c_in
         for i, c_mult in enumerate(c_mults):
             is_last = i == len(c_mults) - 1
-            layers.append(ResConvBlock(c_mult_prev, c_mult, c_mult))
-            layers.append(ResConvBlock(
+            layers.append(DilatedConvBlock(c_mult_prev, c_mult, c_mult))
+            layers.append(DilatedConvBlock(
                 c_mult, c_mult, c_mult, is_last=is_last))
             if not is_last:
                 layers.append(Downsample1d())

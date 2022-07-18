@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from blocks.blocks import Downsample1d, SelfAttention1d, ResConvBlock, Upsample1d
+from blocks.blocks import Downsample1d, SelfAttention1d, DilatedConvBlock, Upsample1d
 
 class AttnResEncoder1D(nn.Module):
     def __init__(
@@ -23,7 +23,7 @@ class AttnResEncoder1D(nn.Module):
         
         c_mults = c_mults[:depth]
 
-        conv_block = ResConvBlock
+        conv_block = DilatedConvBlock
 
         attn_start_layer = depth - n_attn_layers - 1
 
@@ -93,7 +93,7 @@ class AttnResDecoder1D(nn.Module):
 
         c_mults = c_mults[::-1]
 
-        conv_block = ResConvBlock
+        conv_block = DilatedConvBlock
 
         c = c_mults[0]
         layers = [nn.Sequential(

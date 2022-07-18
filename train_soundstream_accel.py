@@ -82,9 +82,9 @@ class SoundStream(nn.Module):
         
         #strides = [2, 4, 5, 8]
 
-        c_mults = [4, 8, 16]
+        c_mults = [2, 4, 8]
         
-        strides = [2, 5, 8]
+        strides = [2, 2, 2]
 
         #self.loudness = Loudness(global_args.sample_rate, 512)
 
