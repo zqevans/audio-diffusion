@@ -21,10 +21,9 @@ import torchaudio
 import wandb
 
 from blocks import utils
-from dataset.dataset import SampleDataset
+from dataset.dataset import SpecDataset
+from diffusion.pqmf import CachedPQMF as PQMF
 
-from nwt_pytorch import Memcodes
-from dvae.residual_memcodes import ResidualMemcodes
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
@@ -86,20 +85,21 @@ def sample(model, x, steps, eta, logits):
     # If we are on the last timestep, output the denoised image
     return pred
 
-class DiffusionStereoizer(nn.Module):
+
+
+class DiffusionVocoder(nn.Module):
     def __init__(self, global_args, device):
         super().__init__()
 
         self.device = device
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2, depth=16, n_attn_layers = 0, c_mults = [128, 128, 256, 256] + [512] * 12)
-
+        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=0, c_mults=[512]*6, depth=6)
+        self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-  
-    def loss(self, reals):
-
-        mono_reals = reals.mean(dim=1, keepdim=True)
-
+        self.ema_decay = global_args.ema_decay
+        
+    def loss(self, specs, reals):
+        
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
@@ -113,9 +113,13 @@ class DiffusionStereoizer(nn.Module):
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
 
+        # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
+        # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
+
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, mono_reals)
-            loss = F.mse_loss(v, targets)
+            v = self.diffusion(noised_reals, t, specs)
+            mse_loss = F.mse_loss(v, targets)
+            loss = mse_loss
 
         return loss
 
@@ -123,9 +127,7 @@ def main():
 
     args = get_all_args()
     
-    args.latent_dim = 1
-
-    #args.random_crop = False
+    args.latent_dim = 2 * args.n_mels
 
     torch.manual_seed(args.seed)
 
@@ -138,7 +140,7 @@ def main():
     device = accelerator.device
     print('Using device:', device, flush=True)
 
-    diffusion_model = DiffusionStereoizer(args, device)
+    diffusion_model = DiffusionVocoder(args, device)
 
     accelerator.print('Parameters:', utils.n_params(diffusion_model))
 
@@ -155,7 +157,10 @@ def main():
     sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
 
-    train_set = SampleDataset([args.training_dir], args)
+    train_set = SpecDataset([args.training_dir], args, n_fft=args.n_fft, hop_length=args.hop_length, n_mels=args.n_mels)
+
+    args.latent_dim = args.n_mels * 2
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
@@ -188,21 +193,19 @@ def main():
     @torch.no_grad()
     @utils.eval_mode(diffusion_model_ema)
     def demo():
-        demo_reals, _ = next(demo_dl)
+        demo_specs, demo_reals, _ = next(demo_dl)
         
         model_ema = accelerator.unwrap_model(diffusion_model_ema)
 
+        demo_specs = demo_specs.to(device)
         demo_reals = demo_reals.to(device)
 
-        mono_reals = demo_reals.mean(dim=1, keepdim=True)
+        noise = torch.randn([demo_reals.shape[0], 2, args.sample_size]).to(device)
 
-        noise = torch.randn([demo_reals.shape[0], 2*args.pqmf_bands, args.sample_size//args.pqmf_bands]).to(device)
-
-        fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, mono_reals)
+        fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, demo_specs)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
-        mono_reals = rearrange(mono_reals, 'b d n -> d (b n)')
         demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
 
         if use_wandb:
@@ -214,8 +217,8 @@ def main():
                 torchaudio.save(filename, fakes, args.sample_rate)
 
                 reals_filename = f'reals_{step:08}.wav'
-                mono_reals = mono_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                torchaudio.save(reals_filename, mono_reals, args.sample_rate)
+                demo_reals = demo_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                torchaudio.save(reals_filename, demo_reals, args.sample_rate)
 
 
                 log_dict[f'recon'] = wandb.Audio(filename,
@@ -223,9 +226,12 @@ def main():
                                                     caption=f'Reconstructed')
                 log_dict[f'real'] = wandb.Audio(reals_filename,
                                                     sample_rate=args.sample_rate,
-                                                    caption=f'Mono')
+                                                    caption=f'Real')
 
-                log_dict[f'real_melspec'] = wandb.Image(audio_spectrogram_image(mono_reals))
+                log_dict[f'embeddings'] = embeddings_table(encoder_input)
+
+                log_dict[f'embeddings_3dpca'] = pca_point_cloud(encoder_input)
+                log_dict[f'input_melspec'] = wandb.Image(tokens_spectrogram_image(demo_specs))
                 log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
 
 
@@ -248,11 +254,12 @@ def main():
             'step': step
         }
         accelerator.save(obj, filename)
+        
     try:
         while True:
             for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
                 opt.zero_grad()
-                loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
+                loss = accelerator.unwrap_model(diffusion_model).loss(batch[0], batch[1])
                 accelerator.backward(loss)
                 opt.step()
                 sched.step()

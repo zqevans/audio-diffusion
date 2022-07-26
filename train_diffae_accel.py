@@ -24,6 +24,7 @@ from blocks import utils
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from encoders.encoders import AttnResEncoder1D
+from autoencoders.soundstream import SoundStreamXLEncoder
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
@@ -99,12 +100,26 @@ class DiffusionDVAE(nn.Module):
         self.pqmf_bands = global_args.pqmf_bands
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, 100, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=8, n_attn_layers=0)
-        self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=6, c_mults=[128, 256] + [512]*12, depth=14)
-        self.diffusion_ema = deepcopy(self.diffusion)
+        #self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=8, n_attn_layers=0)
+        capacity = 64
+
+        c_mults = [2, 4, 8, 16]
+        
+        strides = [2, 2, 2, 2]
+
+        #self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=8, n_attn_layers=0)
+        self.encoder = SoundStreamXLEncoder(
+            in_channels=2*global_args.pqmf_bands, 
+            capacity=capacity, 
+            latent_dim=global_args.latent_dim,
+            c_mults = c_mults,
+            strides = strides
+        )
+
+        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, n_attn_layers=4, c_mults=[256, 256] + [512]*12, depth=10)
+
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
         
@@ -128,11 +143,11 @@ class DiffusionDVAE(nn.Module):
   
     def loss(self, reals):
 
-        encoder_input = reals
-
-        if self.pqmf_bands > 1:
+        if self.pqmf_bands > 1:    
             encoder_input = self.pqmf(reals)
-        
+        else:
+            encoder_input = reals
+
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
@@ -142,9 +157,11 @@ class DiffusionDVAE(nn.Module):
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
         sigmas = sigmas[:, None, None]
-        noise = torch.randn_like(reals)
-        noised_reals = reals * alphas + noise * sigmas
-        targets = noise * alphas - reals * sigmas
+        noise = torch.randn_like(encoder_input)
+        noised_reals = encoder_input * alphas + noise * sigmas
+        targets = noise * alphas - encoder_input * sigmas
+
+        #print(f"noised_reals_shape:{noised_reals.shape}")
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
@@ -164,6 +181,7 @@ class DiffusionDVAE(nn.Module):
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t, latents)
+            #print(f"v shape:{v.shape}")
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -173,7 +191,7 @@ def main():
 
     args = get_all_args()
     
-    args.random_crop = False
+    #args.random_crop = False
 
     torch.manual_seed(args.seed)
 
@@ -242,14 +260,14 @@ def main():
         
         model_ema = accelerator.unwrap_model(diffusion_model_ema)
 
-        if model_ema.pqmf_bands > 1:
-            encoder_input = model_ema.pqmf(demo_reals)
-        
         encoder_input = encoder_input.to(device)
 
         demo_reals = demo_reals.to(device)
 
-        noise = torch.randn([demo_reals.shape[0], 2, args.sample_size]).to(device)
+        if model_ema.pqmf_bands > 1:
+            encoder_input = model_ema.pqmf(demo_reals)
+        
+        noise = torch.randn([demo_reals.shape[0], 2*args.pqmf_bands, args.sample_size//args.pqmf_bands]).to(device)
 
         with torch.no_grad():
 
@@ -264,6 +282,9 @@ def main():
                 latents = rearrange(latents, 'b n d -> b d n')
 
             fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, latents)
+
+            if model_ema.pqmf_bands > 1:
+                fakes = model_ema.pqmf.inverse(fakes)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')

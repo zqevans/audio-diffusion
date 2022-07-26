@@ -89,12 +89,12 @@ def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
 
 
 class CrashDiffusion(nn.Module):
-    def __init__(self, global_args, device, ps_ratio = 1):
+    def __init__(self, global_args, device):
         super().__init__()
 
         self.device = device
 
-        self.diffusion = CrashUNet(n_io_channels=2, ps_ratio=ps_ratio, device=device)
+        self.diffusion = CrashUNet(n_io_channels=2, device=device)
         self.diffusion_ema = deepcopy(self.diffusion)
 
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
@@ -153,7 +153,7 @@ def main():
         config['params'] = utils.n_params(diffusion_model)
         wandb.init(project=args.name, config=config, save_code=True)
 
-    opt = optim.Adam([*diffusion_model.parameters()], lr=4e-5)
+    opt = optim.Adam([*diffusion_model.parameters()], lr=8e-5)
 
     sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)

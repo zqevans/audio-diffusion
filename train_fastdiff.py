@@ -243,10 +243,7 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    if args.use_mfcc:
-        train_set = MFCCDataset([args.training_dir], args)
-    else:
-        train_set = SpecDataset([args.training_dir], args)
+    train_set = SpecDataset([args.training_dir], args, n_fft=args.n_fft, hop_length=args.hop_length, n_mels=args.n_mels)
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)

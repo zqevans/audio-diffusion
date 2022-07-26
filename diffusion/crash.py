@@ -141,15 +141,13 @@ class UBlock(nn.Module):
         else:
             x = F.interpolate(x, size=size)
         
-        for layer in self.layers:
+        for layer in self.layers1:
             x = F.leaky_relu(x, 0.2)
             x = layer(x)
 
         x = x + residual
 
-
-
-        for layer in self.layers:
+        for layer in self.layers2:
             x = F.leaky_relu(x, 0.2)
             x = layer(x)
             
@@ -231,45 +229,139 @@ class CrashEncoder(nn.Module):
         return torch.tanh(self.downsample(audio))
 
 class CrashUNet(nn.Module):
-    def __init__(self, n_io_channels = 2, ps_ratio = 1, unet_cond_dim=0, device="cuda"):
+    def __init__(self, n_io_channels = 2, unet_cond_dim=0, device="cuda"):
         super().__init__()
-        self.conv_1 = Conv1d(n_io_channels * ps_ratio + unet_cond_dim, 256, 5, padding=2)
+        self.conv_1 = Conv1d(n_io_channels + unet_cond_dim, 256, 5, padding=2)
+
+        self.in_convs = nn.ModuleList([
+            Conv1d(256, 256, 5, padding=2),
+            Conv1d(256, 256, 5, padding=2),
+            Conv1d(256, 256, 5, padding=2)
+        ])
+
         self.embedding = RFF_MLP_Block(device)
 
+        # self.downsample = nn.ModuleList([
+        #     DBlock(256, 256, 2), # 48 kHz -> 24 kHz
+        #     DBlock(256, 256, 2), # 24 kHz -> 12 kHz
+        #     DBlock(256, 512, 3), # 12 kHz -> 4 kHz
+        #     DBlock(512, 512, 5), # 4 kHz -> 800 Hz
+        #     DBlock(512, 1024, 5, self_attn=True), # 800 Hz -> 160 Hz
+        #     DBlock(1024, 1024, 5, self_attn=True), # 800 Hz -> 32 Hz
+        # ])
+        # self.gamma_beta = nn.ModuleList([
+        #     Film(256),
+        #     Film(256),
+        #     Film(512),
+        #     Film(512),
+        #     Film(1024),
+        #     Film(1024),
+        # ])
+        # self.upsample = nn.ModuleList([
+        #     UBlock(1024, 1024, 5, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(1024, 512, 5, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(512, 512, 5, [1, 2, 4, 8]),
+        #     UBlock(512, 256, 3, [1, 2, 4, 8]),
+        #     UBlock(256, 256, 2, [1, 2, 4, 8]),
+        #     UBlock(256, 256, 2, [1, 2, 4, 8]),
+        # ])
+
+
+        # CRASH XL
+
+        # self.downsample = nn.ModuleList([
+        #     DBlock(256, 256, 4), 
+        #     DBlock(256, 256, 4),
+        #     DBlock(256, 512, 4), 
+        #     DBlock(512, 512, 2),
+        #     DBlock(512, 512, 2, self_attn=True),
+        #     DBlock(512, 512, 3, self_attn=True), 
+        #     DBlock(512, 512, 3, self_attn=True),
+        #     DBlock(512, 512, 5, self_attn=True),
+        #     DBlock(512, 512, 5, self_attn=True),
+        # ])
+        # self.gamma_beta = nn.ModuleList([
+        #     Film(256),
+        #     Film(256),
+        #     Film(512),
+        #     Film(512),
+        #     Film(512),
+        #     Film(512),
+        #     Film(512),
+        #     Film(512),
+        #     Film(512),
+        # ])
+        # self.upsample = nn.ModuleList([
+        #     UBlock(512, 512, 5, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(512, 512, 5, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(512, 512, 3, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(512, 512, 3, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+        #     UBlock(512, 512, 2, [1, 2, 4, 8]),
+        #     UBlock(512, 256, 4, [1, 2, 4, 8]),
+        #     UBlock(256, 256, 4, [1, 2, 4, 8]),
+        #     UBlock(256, 256, 4, [1, 2, 4, 8]),
+        # ])
+
+        #CRASH XXL
         self.downsample = nn.ModuleList([
-            DBlock(256, 256, 2), # 48 kHz -> 24 kHz
-            DBlock(256, 256, 2), # 24 kHz -> 12 kHz
-            DBlock(256, 512, 3), # 12 kHz -> 4 kHz
-            DBlock(512, 1024, 5), # 4 kHz -> 800 Hz
-            DBlock(1024, 1024, 5, self_attn=True), # 800 Hz -> 160 Hz
+            DBlock(256, 256, 2), # /2
+            DBlock(256, 256, 2), # /4
+            DBlock(256, 512, 2), # /8
+            DBlock(512, 512, 2), # /16
+            DBlock(512, 512, 2), # /32
+            DBlock(512, 512, 2), # /64
+            DBlock(512, 512, 2), # /128
+            DBlock(512, 512, 2), # /256
+            DBlock(512, 512, 2, self_attn=True), # /512
+            DBlock(512, 512, 2, self_attn=True), # /1024
+            DBlock(512, 512, 2, self_attn=True), # /2048
+            DBlock(512, 512, 2, self_attn=True), # /4096
+            DBlock(512, 512, 2, self_attn=True), # /8192
+            DBlock(512, 512, 2, self_attn=True), # /16384
         ])
         self.gamma_beta = nn.ModuleList([
             Film(256),
             Film(256),
             Film(512),
-            Film(1024),
-            Film(1024),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
+            Film(512),
         ])
         self.upsample = nn.ModuleList([
-            UBlock(1024, 1024, 5, [1, 2, 4, 8], self_attn=True),
-            UBlock(1024, 512, 5, [1, 2, 4, 8]),
-            UBlock(512, 256, 3, [1, 2, 4, 8]),
+            UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+            UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+            UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+            UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+            UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+            UBlock(512, 512, 2, [1, 2, 4, 8], self_attn=True),
+            UBlock(512, 512, 2, [1, 2, 4, 8]),
+            UBlock(512, 512, 2, [1, 2, 4, 8]),
+            UBlock(512, 512, 2, [1, 2, 4, 8]),
+            UBlock(512, 512, 2, [1, 2, 4, 8]),
+            UBlock(512, 512, 2, [1, 2, 4, 8]),
+            UBlock(512, 256, 2, [1, 2, 4, 8]),
             UBlock(256, 256, 2, [1, 2, 4, 8]),
             UBlock(256, 256, 2, [1, 2, 4, 8]),
         ])
 
-        self.last_conv = Conv1d(256, n_io_channels * ps_ratio, 3, padding=1)
-
-        self.ps_ratio = ps_ratio
-
-        if ps_ratio > 1:
-            self.ps_down = PixelUnshuffle1D(ps_ratio)
-            self.ps_up = PixelShuffle1D(ps_ratio)
+        self.last_convs = nn.ModuleList([
+            Conv1d(256, 256, 5, padding=2),
+            Conv1d(256, 256, 5, padding=2),
+            Conv1d(256, 256, 5, padding=2),
+            Conv1d(256, n_io_channels, 5, padding=2)
+        ])
 
     def forward(self, audio, sigma, unet_cond=None):
-        if self.ps_ratio > 1:
-            audio = self.ps_down(audio)
-
+  
         inputs = [audio]
 
         if unet_cond is not None:
@@ -279,6 +371,11 @@ class CrashUNet(nn.Module):
         inputs = torch.cat(inputs, dim=1)
 
         x = self.conv_1(inputs)
+
+        for layer in self.in_convs:
+            x = F.leaky_relu(x, 0.2)
+            x = layer(x)
+            
         downsampled = []
         sigma_encoding = self.embedding(sigma.unsqueeze(1))
 
@@ -290,9 +387,8 @@ class CrashUNet(nn.Module):
         for layer, x_dblock in zip(self.upsample, reversed(downsampled)):
             x = layer(x, x_dblock)
 
-        x = self.last_conv(x)
-
-        if self.ps_ratio > 1:
-            x = self.ps_up(x)
+        for layer in self.last_convs:
+            x = F.leaky_relu(x, 0.2)
+            x = layer(x)
 
         return x

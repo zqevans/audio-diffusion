@@ -23,9 +23,9 @@ import wandb
 from blocks import utils
 from dataset.dataset import SampleDataset
 
-from nwt_pytorch import Memcodes
-from dvae.residual_memcodes import ResidualMemcodes
-from decoders.diffusion_decoder import DiffusionAttnUnet1D
+from diffusion.FastDiff.FastDiff_model import FastDiff
+from dataset.dataset import MFCCDataset, SpecDataset
+
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -47,24 +47,27 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, logits):
+def sample(model, reals, specs, steps, eta):
     """Draws samples from a model given starting noise."""
-    ts = x.new_ones([x.shape[0]])
+    ts = reals.new_ones([reals.shape[0]])
 
     # Create the noise schedule
-    t = torch.linspace(1, 0, steps + 1)[:-1]
+    t = torch.linspace(1, 0, steps + 1)[:-1].to(reals.device)
+    specs = specs.to(reals.device)
     alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
 
     # The sampling loop
     for i in trange(steps):
 
+        t_in = (ts * t[i]).unsqueeze(1).to(reals.device)
+
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], logits).float()
+            v = model((reals, specs, t_in)).float()
 
         # Predict the noise and the denoised image
-        pred = x * alphas[i] - v * sigmas[i]
-        eps = x * sigmas[i] + v * alphas[i]
+        pred = reals * alphas[i] - v * sigmas[i]
+        eps = reals * sigmas[i] + v * alphas[i]
 
         # If we are not on the last timestep, compute the noisy image for the
         # next timestep.
@@ -77,30 +80,34 @@ def sample(model, x, steps, eta, logits):
 
             # Recombine the predicted noise and predicted denoised image in the
             # correct proportions for the next step
-            x = pred * alphas[i + 1] + eps * adjusted_sigma
+            reals = pred * alphas[i + 1] + eps * adjusted_sigma
 
             # Add the correct amount of fresh noise
             if eta:
-                x += torch.randn_like(x) * ddim_sigma
+                reals += torch.randn_like(reals) * ddim_sigma
 
     # If we are on the last timestep, output the denoised image
     return pred
 
-class DiffusionStereoizer(nn.Module):
+class FastDiffTrainer(nn.Module):
     def __init__(self, global_args, device):
         super().__init__()
 
         self.device = device
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2, depth=16, n_attn_layers = 0, c_mults = [128, 128, 256, 256] + [512] * 12)
-
+        self.diffusion = FastDiff(
+            audio_channels=2,
+            cond_channels=global_args.n_mels*2,
+            upsample_ratios=[8, 8, 4],
+        )
+        
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-  
-    def loss(self, reals):
+        
+    def loss(self, batch):
 
-        mono_reals = reals.mean(dim=1, keepdim=True)
+        specs, reals, _ = batch
 
-        # Draw uniformly distributed continuous timesteps
+         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
         # Calculate the noise schedule parameters for those timesteps
@@ -114,7 +121,7 @@ class DiffusionStereoizer(nn.Module):
         targets = noise * alphas - reals * sigmas
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, mono_reals)
+            v = self.diffusion((noised_reals, specs, t.unsqueeze(1)))
             loss = F.mse_loss(v, targets)
 
         return loss
@@ -123,8 +130,6 @@ def main():
 
     args = get_all_args()
     
-    args.latent_dim = 1
-
     #args.random_crop = False
 
     torch.manual_seed(args.seed)
@@ -138,7 +143,7 @@ def main():
     device = accelerator.device
     print('Using device:', device, flush=True)
 
-    diffusion_model = DiffusionStereoizer(args, device)
+    diffusion_model = FastDiffTrainer(args, device)
 
     accelerator.print('Parameters:', utils.n_params(diffusion_model))
 
@@ -153,15 +158,17 @@ def main():
     opt = optim.Adam([*diffusion_model.diffusion.parameters()], lr=4e-5)
 
     sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
-    ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
+    #ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
 
-    train_set = SampleDataset([args.training_dir], args)
+
+    train_set = SpecDataset([args.training_dir], args, n_fft=args.n_fft, hop_length=args.hop_length, n_mels=args.n_mels)
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
 
     diffusion_model, opt, train_dl = accelerator.prepare(diffusion_model, opt, train_dl)
 
-    diffusion_model_ema = deepcopy(diffusion_model)
+    #diffusion_model_ema = deepcopy(diffusion_model)
 
     demo_dl = data.DataLoader(train_set, args.num_demos, num_workers=args.num_workers, shuffle=True)
     
@@ -173,10 +180,10 @@ def main():
     if args.ckpt_path:
         ckpt = torch.load(args.ckpt_path, map_location='cpu')
         accelerator.unwrap_model(diffusion_model).load_state_dict(ckpt['model'])
-        accelerator.unwrap_model(diffusion_model_ema).load_state_dict(ckpt['model_ema'])
+        #accelerator.unwrap_model(diffusion_model_ema).load_state_dict(ckpt['model_ema'])
         opt.load_state_dict(ckpt['opt'])
         sched.load_state_dict(ckpt['sched'])
-        ema_sched.load_state_dict(ckpt['ema_sched'])
+        #ema_sched.load_state_dict(ckpt['ema_sched'])
         epoch = ckpt['epoch'] + 1
         step = ckpt['step'] + 1
         del ckpt
@@ -186,23 +193,20 @@ def main():
 
 
     @torch.no_grad()
-    @utils.eval_mode(diffusion_model_ema)
+    @utils.eval_mode(diffusion_model)
     def demo():
-        demo_reals, _ = next(demo_dl)
-        
-        model_ema = accelerator.unwrap_model(diffusion_model_ema)
+        demo_specs, demo_reals, _ = next(demo_dl)
 
         demo_reals = demo_reals.to(device)
 
-        mono_reals = demo_reals.mean(dim=1, keepdim=True)
+        noise = torch.randn([demo_reals.shape[0], 2, args.sample_size]).to(device)
 
-        noise = torch.randn([demo_reals.shape[0], 2*args.pqmf_bands, args.sample_size//args.pqmf_bands]).to(device)
+        diffusion = accelerator.unwrap_model(diffusion_model).diffusion
 
-        fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, mono_reals)
+        fakes = sample(diffusion, noise, demo_specs, args.demo_steps, 1)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
-        mono_reals = rearrange(mono_reals, 'b d n -> d (b n)')
         demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
 
         if use_wandb:
@@ -214,8 +218,8 @@ def main():
                 torchaudio.save(filename, fakes, args.sample_rate)
 
                 reals_filename = f'reals_{step:08}.wav'
-                mono_reals = mono_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-                torchaudio.save(reals_filename, mono_reals, args.sample_rate)
+                demo_reals = demo_reals.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
+                torchaudio.save(reals_filename, demo_reals, args.sample_rate)
 
 
                 log_dict[f'recon'] = wandb.Audio(filename,
@@ -223,9 +227,9 @@ def main():
                                                     caption=f'Reconstructed')
                 log_dict[f'real'] = wandb.Audio(reals_filename,
                                                     sample_rate=args.sample_rate,
-                                                    caption=f'Mono')
+                                                    caption=f'Real')
 
-                log_dict[f'real_melspec'] = wandb.Image(audio_spectrogram_image(mono_reals))
+                log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
                 log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
 
 
@@ -240,10 +244,10 @@ def main():
             tqdm.write(f'Saving to {filename}...')
         obj = {
             'model': accelerator.unwrap_model(diffusion_model).state_dict(),
-            'model_ema': accelerator.unwrap_model(diffusion_model_ema).state_dict(),
+            #'model_ema': accelerator.unwrap_model(diffusion_model_ema).state_dict(),
             'opt': opt.state_dict(),
             'sched': sched.state_dict(),
-            'ema_sched': ema_sched.state_dict(),
+            #'ema_sched': ema_sched.state_dict(),
             'epoch': epoch,
             'step': step
         }
@@ -252,19 +256,19 @@ def main():
         while True:
             for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
                 opt.zero_grad()
-                loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
+                loss = accelerator.unwrap_model(diffusion_model).loss(batch)
                 accelerator.backward(loss)
                 opt.step()
                 sched.step()
-                ema_decay = ema_sched.get_value()
+                # ema_decay = ema_sched.get_value()
                 
-                utils.ema_update(
-                    accelerator.unwrap_model(diffusion_model), 
-                    accelerator.unwrap_model(diffusion_model_ema),
-                    ema_decay
-                )
+                # utils.ema_update(
+                #     accelerator.unwrap_model(diffusion_model), 
+                #     accelerator.unwrap_model(diffusion_model_ema),
+                #     ema_decay
+                # )
 
-                ema_sched.step()
+                # ema_sched.step()
 
                 if accelerator.is_main_process:
                     if step % 25 == 0:
@@ -275,7 +279,7 @@ def main():
                             'epoch': epoch,
                             'loss': loss.item(),
                             'lr': sched.get_last_lr()[0],
-                            'ema_decay': ema_decay,
+                            #'ema_decay': ema_decay,
                         }
                         wandb.log(log_dict, step=step)
 

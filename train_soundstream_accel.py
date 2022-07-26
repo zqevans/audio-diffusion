@@ -66,7 +66,7 @@ LAMBDA_QUANTIZER = 1
 PQMF_ATTN = 100
 
 class SoundStream(nn.Module):
-    def __init__(self, global_args, device, depth=8, n_attn_layers = 0):
+    def __init__(self, global_args, device, n_attn_layers = 0):
         super().__init__()
 
         self.device = device
@@ -76,15 +76,15 @@ class SoundStream(nn.Module):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, PQMF_ATTN, global_args.pqmf_bands)
 
-        capacity = 64
+        capacity = 32
 
         #c_mults = [2, 4, 8, 16]
         
         #strides = [2, 4, 5, 8]
 
-        c_mults = [2, 4, 8]
+        c_mults = [2, 4, 8, 16]
         
-        strides = [2, 2, 2]
+        strides = [2, 2, 2, 2]
 
         #self.loudness = Loudness(global_args.sample_rate, 512)
 
@@ -158,7 +158,7 @@ class SoundStream(nn.Module):
                 **quantizer_kwargs
             )
 
-        self.use_adv_losses = not global_args.skip_adv_losses
+        self.warmed_up = False
 
     def loss(self, reals):
 
@@ -172,26 +172,32 @@ class SoundStream(nn.Module):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            latents = self.encoder(encoder_input).float()
 
-            p.tick("encoder")
-
-            tokens = rearrange(latents, 'b d n -> b n d')
-
-            tokens, _ = self.quantizer(tokens)
-
-            tokens = rearrange(tokens, 'b n d -> b d n')
+            if self.warmed_up:
+                with torch.no_grad():
+                    latents = self.encoder(encoder_input).float()
+                    #p.tick("encoder")
+                    tokens = rearrange(latents, 'b d n -> b n d')
+                    tokens, _ = self.quantizer(tokens)
+                    tokens = rearrange(tokens, 'b n d -> b d n')
+            else:
+                latents = self.encoder(encoder_input).float()
+                #p.tick("encoder")
+                tokens = rearrange(latents, 'b d n -> b n d')
+                # tokens, _ = self.quantizer(tokens)
+                tokens = l2norm(tokens)
+                tokens = rearrange(tokens, 'b n d -> b d n')
+                
 
             # if self.num_quantizers > 0:
             #     tokens /= self.num_quantizers
             
-            tokens = l2norm(tokens)
 
-            p.tick("quantizer")
+            #p.tick("quantizer")
 
             decoded = self.decoder(tokens)
 
-            p.tick("decoder")
+            #p.tick("decoder")
 
             #Add pre-PQMF loss
 
@@ -199,22 +205,22 @@ class SoundStream(nn.Module):
 
                 # Multi-scale STFT loss on the PQMF for multiband harmonic content
                 mb_distance = self.mrstft(encoder_input, decoded)
-                p.tick("mb_distance")
+                #p.tick("mb_distance")
 
             
                 decoded = self.pqmf.inverse(decoded)
-                p.tick("pqmf_inverse")
+                #p.tick("pqmf_inverse")
 
             # Multi-scale mid-side STFT loss for stereo/harmonic information
             mrstft_loss = self.sdstft(reals, decoded)
-            p.tick("fb_distance")
+            #p.tick("fb_distance")
             
             # loud_reals = self.loudness(reals)
             # loud_decoded = self.loudness(decoded)
             # loud_dist = (loud_reals - loud_decoded).pow(2).mean()
             # p.tick("loudness distance")
 
-            if self.use_adv_losses:
+            if self.warmed_up:
                 loss_disc, loss_adv, feature_dist, _, _ = self.discriminator.loss(reals, decoded)
                 p.tick("discriminator")
             else:
@@ -260,7 +266,7 @@ def main():
     device = accelerator.device
     print('Using device:', device, flush=True)
 
-    model = SoundStream(args, device, depth=args.depth)
+    model = SoundStream(args, device)
 
     accelerator.print('Parameters:', utils.n_params(model))
 
@@ -323,16 +329,14 @@ def main():
             encoder_input = model_unwrap.pqmf(demo_reals)
         
         with torch.no_grad():
-
             latents = model_unwrap.encoder(encoder_input)
 
             tokens = rearrange(latents, 'b d n -> b n d')
 
-            tokens, _ = model_unwrap.quantizer(tokens)
+            #tokens, _ = model_unwrap.quantizer(tokens)
+            tokens = l2norm(tokens)
 
             tokens = rearrange(tokens, 'b n d -> b d n')
-
-            tokens = l2norm(tokens)
 
             fakes = model_unwrap.decoder(tokens)
 
@@ -401,12 +405,15 @@ def main():
                 model_unwrap = accelerator.unwrap_model(model)
 
                 gen_loss, disc_loss, log_dict = model_unwrap.loss(batch[0])
+
+                if step >= args.warmup_steps:
+                    model_unwrap.warmed_up = True
                 
-                if step%2 and model_unwrap.use_adv_losses:
+                if step%2 and model_unwrap.warmed_up:
                     opt_disc.zero_grad()
                     accelerator.backward(disc_loss)
                     opt_disc.step()
-                else :
+                else:
                     opt_gen.zero_grad()
                     accelerator.backward(gen_loss)
                     opt_gen.step()

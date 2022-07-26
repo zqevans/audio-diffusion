@@ -103,9 +103,9 @@ class DiffGAN(nn.Module):
 
         capacity = 64
 
-        c_mults = [2, 4, 8]
+        c_mults = [2, 4, 8, 16]
         
-        strides = [2, 2, 2]
+        strides = [4, 2, 2, 2]
 
         #self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=8, n_attn_layers=0)
         self.encoder = SoundStreamXLEncoder(
@@ -160,6 +160,7 @@ class DiffGAN(nn.Module):
             win_lengths.append(s)
 
         self.mrstft = auraloss.freq.MultiResolutionSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths, w_log_mag=1.0, w_lin_mag=1.0, device=device)
+        self.sdstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
   
     def loss(self, reals):
 
@@ -203,6 +204,7 @@ class DiffGAN(nn.Module):
             v = self.diffusion(noised_reals, t, latents)
             #print(f"v shape:{v.shape}")
             mse_loss = LAMBDA_DIFFUSION * F.mse_loss(v, targets)
+            v_stft_loss = self.mrstft(v, targets)
 
         #Decode audio
         decoded_audio = self.decoder(latents)
@@ -211,19 +213,19 @@ class DiffGAN(nn.Module):
             mb_distance = self.mrstft(encoder_input, decoded_audio)
             decoded_audio = self.pqmf.inverse(decoded_audio)
 
-        mrstft_loss = self.mrstft(reals, decoded_audio)
+        sdstft_loss = self.sdstft(reals, decoded_audio)
             
+        loss = mse_loss + v_stft_loss + sdstft_loss
 
-        loss = mse_loss + mrstft_loss
+        log_dict = {
+            'train/mse_loss': mse_loss.detach(),
+            'train/sdstft_loss': sdstft_loss.detach(),
+            'v_stft_loss': v_stft_loss.detach()
+        }
 
         if self.pqmf_bands > 1:
             loss += mb_distance
-        
-        log_dict = {
-            'train/mse_loss': mse_loss.detach(),
-            'train/mrstft_loss': mrstft_loss.detach(),
-            'train/mb_distance': mb_distance.detach(),
-        }
+            log_dict["train/mb_distance"] = mb_distance.detach(),
 
         return loss, log_dict
 

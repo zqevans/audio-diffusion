@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 import json
+import auraloss
 
 import accelerate
 import sys
@@ -93,11 +94,10 @@ class AudioDiffusion(nn.Module):
 
         self.device = device
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2, depth=16, n_attn_layers = 6, c_mults = [128, 128, 256, 256] + [512] * 12)
-        self.diffusion_ema = deepcopy(self.diffusion)
+        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2, depth=16, n_attn_layers = 7, c_mults = [128, 128, 256, 256] + [512] * 12)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
-  
+
     def loss(self, reals):
         
         # Draw uniformly distributed continuous timesteps
@@ -118,7 +118,11 @@ class AudioDiffusion(nn.Module):
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
-        return loss
+        log_dict = {
+            'mse_loss': mse_loss.detach()
+        }
+
+        return loss, log_dict
 
 def main():
 
@@ -126,6 +130,8 @@ def main():
 
     args.latent_dim = 0
     
+    args.random_crop = False
+
     try:
         mp.set_start_method(args.start_method)
     except RuntimeError:
@@ -235,7 +241,7 @@ def main():
         while True:
             for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
                 opt.zero_grad()
-                loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
+                loss, log_dict = accelerator.unwrap_model(diffusion_model).loss(batch[0])
                 accelerator.backward(loss)
                 opt.step()
                 sched.step()
@@ -255,6 +261,7 @@ def main():
 
                     if use_wandb:
                         log_dict = {
+                            **log_dict,
                             'epoch': epoch,
                             'loss': loss.item(),
                             'lr': sched.get_last_lr()[0],

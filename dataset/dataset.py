@@ -10,7 +10,7 @@ import tqdm
 #import multiprocessing
 from multiprocessing import Pool, cpu_count, Barrier
 from functools import partial
-
+from einops import rearrange
 from udls import SimpleLMDBDataset
 
 
@@ -110,7 +110,7 @@ class SampleDataset(torch.utils.data.Dataset):
 
 # A dataset that will return spectrograms alongside the audio data
 class SpecDataset(torch.utils.data.Dataset):
-  def __init__(self, paths, global_args):
+  def __init__(self, paths, global_args, n_fft=1024, hop_length=256, n_mels=80):
     super().__init__()
     self.filenames = []
 
@@ -129,7 +129,7 @@ class SpecDataset(torch.utils.data.Dataset):
 
     self.sr = global_args.sample_rate
 
-    self.to_mel_spec = T.MelSpectrogram(sample_rate=self.sr, n_fft=1024, hop_length=256, n_mels=80, pad_mode='constant')
+    self.to_mel_spec = T.MelSpectrogram(sample_rate=self.sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, pad_mode='constant', norm="slaney")
 
     self.cache_training_data = global_args.cache_training_data
 
@@ -167,7 +167,9 @@ class SpecDataset(torch.utils.data.Dataset):
       spec = self.to_mel_spec(audio) #(C, n_mels, T)
 
       #Get the mean spectrogram over the dimensions
-      spec = torch.mean(spec, 0) #(n_mels, T)
+      #spec = torch.mean(spec, 0) #(n_mels, T)
+
+      spec = rearrange(spec, "C n_mels T -> (n_mels C) T")
 
       return (spec, audio, audio_filename)
     except Exception as e:
