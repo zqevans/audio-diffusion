@@ -59,8 +59,8 @@ class DiffusionAttnUnet1D(nn.Module):
     ):
         super().__init__()
 
-        max_depth = 14
-        depth = min(depth, max_depth)
+        # max_depth = 
+        # depth = min(depth, max_depth)
 
         self.timestep_embed = FourierFeatures(1, 16)
 

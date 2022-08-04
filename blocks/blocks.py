@@ -89,7 +89,6 @@ class ResModConvBlock(ConditionedResidualBlock):
             nn.Dropout(dropout_rate, inplace=True),
             skip=skip)
 
-
 class SelfAttention1d(nn.Module):
     def __init__(self, c_in, n_head=1, dropout_rate=0.):
         super().__init__()
@@ -133,7 +132,6 @@ class SelfAttentionMod1d(ConditionedModule):
         y = (att @ v).transpose(2, 3).contiguous().view([n, c, s])
         return input + self.out_proj(y)
 
-
 class SkipBlock(nn.Module):
     def __init__(self, *main):
         super().__init__()
@@ -141,7 +139,6 @@ class SkipBlock(nn.Module):
 
     def forward(self, input):
         return torch.cat([self.main(input), input], dim=1)
-
 
 class FourierFeatures(nn.Module):
     def __init__(self, in_features, out_features, std=1.):
@@ -157,15 +154,6 @@ class FourierFeatures(nn.Module):
 
 def expand_to_planes(input, shape):
     return input[..., None].repeat([1, 1, shape[2]])
-
-class Transpose(nn.Sequential):
-    def __init__(self, dim0, dim1):
-        super().__init__()
-        self.dim0 = dim0
-        self.dim1 = dim1
-
-    def forward(self, input):
-        return torch.transpose(input, self.dim0, self.dim1)
 
 _kernels = {
     'linear':

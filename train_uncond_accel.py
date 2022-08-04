@@ -47,13 +47,16 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
+def sample(model, x, steps, eta):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+
+    t = get_crash_schedule(t)
+
+    alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
     for i in trange(steps):
@@ -94,7 +97,7 @@ class AudioDiffusion(nn.Module):
 
         self.device = device
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2, depth=16, n_attn_layers = 7, c_mults = [128, 128, 256, 256] + [512] * 12)
+        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, depth=14, n_attn_layers = 6, c_mults = [128, 128, 256, 256] + [512] * 12)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
 
@@ -103,8 +106,10 @@ class AudioDiffusion(nn.Module):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
+        t = get_crash_schedule(t)
+
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+        alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
@@ -130,7 +135,7 @@ def main():
 
     args.latent_dim = 0
     
-    args.random_crop = False
+    #args.random_crop = False
 
     try:
         mp.set_start_method(args.start_method)
@@ -156,9 +161,9 @@ def main():
         wandb.init(project=args.name, config=config, save_code=True)
 
 
-    opt = optim.Adam([*diffusion_model.parameters()], lr=4e-5)
+    opt = optim.Adam([*diffusion_model.parameters()], lr=1e-4)
 
-    sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
+    sched = utils.InverseLR(opt, inv_gamma=20000, power=1.0, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
 
     train_set = SampleDataset([args.training_dir], args)
@@ -196,7 +201,7 @@ def main():
 
         noise = torch.randn([args.num_demos, 2, args.sample_size]).to(device)
 
-        fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1)
+        fakes = sample(model_ema.diffusion, noise, args.demo_steps, 0)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')

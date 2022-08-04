@@ -25,7 +25,7 @@ import wandb
 from blocks import utils
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from encoders.encoders import AttnResEncoder1D, GlobalEncoder
+from encoders.encoders import AttnResEncoder1D, GlobalEncoder, AudioPerceiverEncoder
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
@@ -57,7 +57,8 @@ def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+    t = get_crash_schedule(t)
+    alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
     for i in trange(steps):
@@ -104,11 +105,27 @@ class DiffusionDVAE(nn.Module):
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
         self.global_encoder = GlobalEncoder(global_args.global_latent_dim, 2*global_args.pqmf_bands)
+        #self.global_encoder = AudioPerceiverEncoder(n_io_channels = 2*global_args.pqmf_bands, latent_dim=global_args.global_latent_dim, depth=12)
 
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=7, n_attn_layers=0, c_mults=[256, 256]*2 + [512] * 5)
+        self.encoder = None
+
+        if global_args.latent_dim > 0:
+            #self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=8, n_attn_layers=0)
+            capacity = 32
+
+            c_mults = [2, 4, 8, 16]
+            
+            strides = [4, 4, 4, 2]
+
+            self.encoder = SoundStreamXLEncoder(
+                in_channels=2*global_args.pqmf_bands, 
+                capacity=capacity, 
+                latent_dim=global_args.latent_dim,
+                c_mults = c_mults,
+                strides = strides
+            )
 
         model_config = json.load(open(global_args.model_config))
-  
         
         #size = model_config['input_size'] # Input size is determined by global_args.sample_size instead
 
@@ -152,8 +169,10 @@ class DiffusionDVAE(nn.Module):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
+        t = get_crash_schedule(t)
+
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+        alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
@@ -165,25 +184,29 @@ class DiffusionDVAE(nn.Module):
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
             global_latent = self.global_encoder(encoder_input).float()
-            global_latent = F.normalize(global_latent, p=2, dim=-1)
-            latents = self.encoder(encoder_input).float()
+            #global_latent = F.normalize(global_latent, p=2, dim=1)
 
-        if self.num_quantizers > 0:
-            #Rearrange for Memcodes
-            latents = rearrange(latents, 'b d n -> b n d')
+            if self.encoder is not None:
+                latents = self.encoder(encoder_input).float()
 
-            #Quantize into memcodes
-            latents, _ = self.quantizer(latents)
+                if self.num_quantizers > 0:
+                    #Rearrange for Memcodes
+                    latents = rearrange(latents, 'b d n -> b n d')
 
-            latents = rearrange(latents, 'b n d -> b d n')
+                    #Quantize into memcodes
+                    latents, _ = self.quantizer(latents)
+
+                    latents = rearrange(latents, 'b n d -> b d n')
 
         # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
         # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
 
-        latents_interp = F.interpolate(latents, (noised_reals.shape[2], ), mode='linear', align_corners=False)
-
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, mapping_cond = global_latent, unet_cond=latents_interp, log_sigma=False)
+            if self.encoder is not None:
+                latents_interp = F.interpolate(latents, (noised_reals.shape[2], ), mode='linear', align_corners=False)
+                v = self.diffusion(noised_reals, t, mapping_cond = global_latent, unet_cond=latents_interp, log_sigma=False)
+            else:
+                v = self.diffusion(noised_reals, t, mapping_cond = global_latent, log_sigma=False)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -192,6 +215,8 @@ class DiffusionDVAE(nn.Module):
 def main():
 
     args = get_all_args()
+    
+    #args.random_crop = False
     
     try:
         mp.set_start_method(args.start_method)
@@ -221,9 +246,9 @@ def main():
         wandb.init(project=args.name, config=config, save_code=True)
 
 
-    opt = optim.Adam([*diffusion_model.parameters()], lr=4e-5)
+    opt = optim.Adam([*diffusion_model.parameters()], lr=8e-5)
 
-    sched = utils.InverseLR(opt, inv_gamma=50000, power=1/2, warmup=0.99)
+    sched = utils.InverseLR(opt, inv_gamma=20000, power=1., warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
 
     train_set = SampleDataset([args.training_dir], args)
@@ -266,33 +291,36 @@ def main():
         
         model_ema = accelerator.unwrap_model(diffusion_model_ema)
 
-        if model_ema.pqmf_bands > 1:
-            encoder_input = model_ema.pqmf(demo_reals)
-        
         encoder_input = encoder_input.to(device)
 
         demo_reals = demo_reals.to(device)
 
+        if model_ema.pqmf_bands > 1:
+            encoder_input = model_ema.pqmf(demo_reals)
+
         noise = torch.randn([demo_reals.shape[0], 2, args.sample_size]).to(device)
 
         with torch.no_grad():
-            latents = model_ema.encoder(encoder_input)
+            
             global_latent = model_ema.global_encoder(encoder_input)
-            global_latent = F.normalize(global_latent, p=2, dim=-1)
-            print(f'global latent norm: {global_latent.norm(p=2)}')
+            # global_latent = F.normalize(global_latent, p=2, dim=1)
+            # print(f'global latent norm: {global_latent.norm(p=2, dim=1)}')
 
-            if model_ema.num_quantizers > 0:
+            if args.latent_dim > 0:
+                latents = model_ema.encoder(encoder_input)
 
-                #Rearrange for Memcodes
-                latents = rearrange(latents, 'b d n -> b n d')
+                if model_ema.num_quantizers > 0:
 
-                latents, _= model_ema.quantizer(latents)
-                latents = rearrange(latents, 'b n d -> b d n')
+                    #Rearrange for Memcodes
+                    latents = rearrange(latents, 'b d n -> b n d')
+
+                    latents, _= model_ema.quantizer(latents)
+                    latents = rearrange(latents, 'b n d -> b d n')
 
 
-            latents_interp = F.interpolate(latents, (demo_reals.shape[2], ), mode='linear', align_corners=False)
+                latents_interp = F.interpolate(latents, (demo_reals.shape[2], ), mode='linear', align_corners=False)
 
-            fakes = sample(model_ema.diffusion, noise, args.demo_steps, 1, mapping_cond=global_latent, unet_cond=latents_interp)
+            fakes = sample(model_ema.diffusion, noise, args.demo_steps, 0, mapping_cond=global_latent, unet_cond=latents_interp if args.latent_dim > 0 else None)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -317,11 +345,12 @@ def main():
                                                 sample_rate=args.sample_rate,
                                                 caption=f'Real')
 
-            log_dict[f'embeddings'] = embeddings_table(latents)
+            if args.latent_dim > 0:
+                log_dict[f'embeddings'] = embeddings_table(latents)
+                log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
+                log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
 
-            log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
-            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
-            log_dict[f'embeddings_avg_spec'] = wandb.Image(tokens_spectrogram_image(repeat(global_latent, 'b d -> b d n', n = latents.shape[2]), title="Global latents"))
+            log_dict[f'embeddings_avg_spec'] = wandb.Image(tokens_spectrogram_image(repeat(global_latent, 'b d -> b d n', n = 100), title="Global latents"))
 
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
@@ -334,7 +363,7 @@ def main():
     def save():
         accelerator.wait_for_everyone()
         filename = f'{args.name}_{step:08}.pth'
-        if accelerator.is_local_main_process:
+        if accelerator.is_main_process:
             tqdm.write(f'Saving to {filename}...')
         obj = {
             'model': accelerator.unwrap_model(diffusion_model).state_dict(),
@@ -346,12 +375,12 @@ def main():
             'step': step
         }
         accelerator.save(obj, filename)
-        if args.wandb_save_model and use_wandb:
+        if use_wandb:
             wandb.save(filename)
 
     try:
         while True:
-            for batch in tqdm(train_dl, disable=not accelerator.is_local_main_process):
+            for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
                 opt.zero_grad()
                 loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
                 accelerator.backward(loss)
@@ -367,7 +396,7 @@ def main():
 
                 ema_sched.step()
 
-                if accelerator.is_local_main_process:
+                if accelerator.is_main_process:
                     if step % 25 == 0:
                         tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {loss.item():g}')
 
@@ -383,8 +412,8 @@ def main():
                     if step % args.demo_every == 0:
                         demo()
 
-                    if step > 0 and step % args.checkpoint_every == 0:
-                        save()
+                if step > 0 and step % args.checkpoint_every == 0:
+                    save()
 
                 step += 1
             epoch += 1

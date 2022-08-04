@@ -92,7 +92,7 @@ def audio_spectrogram_image(waveform, power=2.0, sample_rate=48000):
     n_fft = 1024
     win_length = None
     hop_length = 512
-    n_mels = 128
+    n_mels = 80
 
     mel_spectrogram_op = T.MelSpectrogram(
         sample_rate=sample_rate, n_fft=n_fft, win_length=win_length, 
