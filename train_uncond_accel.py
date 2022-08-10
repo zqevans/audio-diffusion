@@ -89,46 +89,6 @@ def sample(model, x, steps, eta):
     # If we are on the last timestep, output the denoised image
     return pred
 
-
-
-class AudioDiffusion(nn.Module):
-    def __init__(self, global_args, device):
-        super().__init__()
-
-        self.device = device
-
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, depth=14, n_attn_layers = 6, c_mults = [128, 128, 256, 256] + [512] * 12)
-        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.ema_decay = global_args.ema_decay
-
-    def loss(self, reals):
-        
-        # Draw uniformly distributed continuous timesteps
-        t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
-
-        t = get_crash_schedule(t)
-
-        # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(t)
-
-        # Combine the ground truth images and the noise
-        alphas = alphas[:, None, None]
-        sigmas = sigmas[:, None, None]
-        noise = torch.randn_like(reals)
-        noised_reals = reals * alphas + noise * sigmas
-        targets = noise * alphas - reals * sigmas
-
-        with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t)
-            mse_loss = F.mse_loss(v, targets)
-            loss = mse_loss
-
-        log_dict = {
-            'mse_loss': mse_loss.detach()
-        }
-
-        return loss, log_dict
-
 def main():
 
     args = get_all_args()
@@ -146,9 +106,10 @@ def main():
 
     accelerator = accelerate.Accelerator()
     device = accelerator.device
+    rng = torch.quasirandom.SobolEngine(1, scramble=True)
     print('Using device:', device, flush=True)
 
-    diffusion_model = AudioDiffusion(args, device)
+    diffusion_model = DiffusionAttnUnet1D(args, io_channels=2*args.pqmf_bands, n_attn_layers = 4)
 
     accelerator.print('Parameters:', utils.n_params(diffusion_model))
     
@@ -161,7 +122,7 @@ def main():
         wandb.init(project=args.name, config=config, save_code=True)
 
 
-    opt = optim.Adam([*diffusion_model.parameters()], lr=1e-4)
+    opt = optim.Adam([*diffusion_model.parameters()], lr=4e-5)
 
     sched = utils.InverseLR(opt, inv_gamma=20000, power=1.0, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
@@ -176,7 +137,6 @@ def main():
 
     if use_wandb:
         wandb.watch(diffusion_model)
-
         
     if args.ckpt_path:
         ckpt = torch.load(args.ckpt_path, map_location='cpu')
@@ -201,7 +161,7 @@ def main():
 
         noise = torch.randn([args.num_demos, 2, args.sample_size]).to(device)
 
-        fakes = sample(model_ema.diffusion, noise, args.demo_steps, 0)
+        fakes = sample(model_ema, noise, args.demo_steps, 0)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -245,16 +205,40 @@ def main():
     try:
         while True:
             for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
-                opt.zero_grad()
-                loss, log_dict = accelerator.unwrap_model(diffusion_model).loss(batch[0])
+                reals, _ = batch
+                #loss, log_dict = accelerator.unwrap_model(diffusion_model)(audios)
+
+                 # Draw uniformly distributed continuous timesteps
+                t = rng.draw(reals.shape[0])[:, 0].to(device)
+
+                t = get_crash_schedule(t)
+
+                # Calculate the noise schedule parameters for those timesteps
+                alphas, sigmas = get_alphas_sigmas(t)
+
+                # Combine the ground truth images and the noise
+                alphas = alphas[:, None, None]
+                sigmas = sigmas[:, None, None]
+                noise = torch.randn_like(reals)
+                noised_reals = reals * alphas + noise * sigmas
+                targets = noise * alphas - reals * sigmas
+
+                with torch.cuda.amp.autocast():
+                    v = diffusion_model(noised_reals, t)
+                    mse_loss = F.mse_loss(v, targets)
+                    loss = mse_loss
+
                 accelerator.backward(loss)
                 opt.step()
                 sched.step()
+                opt.zero_grad()
+
+                #if accelerator.sync_gradients:
                 ema_decay = ema_sched.get_value()
                 
                 utils.ema_update(
-                    accelerator.unwrap_model(diffusion_model), 
-                    accelerator.unwrap_model(diffusion_model_ema),
+                    diffusion_model,
+                    diffusion_model_ema,
                     ema_decay
                 )
 
@@ -266,7 +250,7 @@ def main():
 
                     if use_wandb:
                         log_dict = {
-                            **log_dict,
+                            'mse_loss': mse_loss.detach(),
                             'epoch': epoch,
                             'loss': loss.item(),
                             'lr': sched.get_last_lr()[0],
