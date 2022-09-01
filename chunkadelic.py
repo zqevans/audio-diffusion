@@ -19,6 +19,7 @@ import torch
 import torchaudio
 from torchaudio import transforms as T
 import math
+from dataset.dataset import get_audio_filenames
 
 def is_silence(
     audio,       # torch tensor of multichannel audio
@@ -96,6 +97,7 @@ def process_one_file(filenames, args, file_ind):
         audio = load_file(filename, sr=args.sr)
         blow_chunks(audio, new_filename, args.chunk_size, sr=args.sr, overlap=args.overlap, strip=args.strip, thresh=args.thresh)
     except Exception as e: 
+        print(e)
         print(f"Error loading {filename} or writing chunks. Skipping.")
 
     return
@@ -115,13 +117,18 @@ def main():
     print(f"  output_path = {args.output_path}")
     print(f"  chunk_size = {args.chunk_size}")
 
+    torchaudio.set_audio_backend("sox_io")
+
     print("Getting list of input filenames")
-    filenames = []
-    for path in args.input_paths:
-        for ext in ['wav','flac','ogg','aiff','aif','mp3']:
-            filenames += glob(f'{path}/**/*.{ext}', recursive=True)  
+    filenames = get_audio_filenames(args.input_paths)
+    # for path in args.input_paths:
+    #     for ext in ['wav','flac','ogg']:
+    #         filenames += glob(f'{path}/**/*.{ext}', recursive=True)  
     n = len(filenames)   
-    print(f"  Got {n} input filenames") 
+    print(f"Got {n} input filenames") 
+
+    # for i in range(n):
+    #     process_one_file(filenames, args, i)
 
     print("Processing files (in parallel)")
     wrapper = partial(process_one_file, filenames, args)

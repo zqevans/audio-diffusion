@@ -51,7 +51,10 @@ def sample(model, x, steps, eta):
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+
+    t = get_crash_schedule(t)
+
+    alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
     for i in trange(steps):
@@ -84,20 +87,15 @@ def sample(model, x, steps, eta):
     # If we are on the last timestep, output the denoised image
     return pred
 
-
-
 class DiffusionUncond(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
+        #self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, n_attn_layers=4)
 
-        self.pqmf_bands = global_args.pqmf_bands
+        self.diffusion = DiffusionAttnUnet1D(io_channels=2, pqmf_bands = global_args.pqmf_bands, n_attn_layers=4)
 
-        if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
-
-        self.diffusion = DiffusionAttnUnet1D(global_args, io_channels=2*global_args.pqmf_bands, n_attn_layers=5)
         self.diffusion_ema = deepcopy(self.diffusion)
-        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.rng = torch.quasirandom.SobolEngine(1, scramble=True, seed=global_args.seed)
         self.ema_decay = global_args.ema_decay
         
     def configure_optimizers(self):
@@ -105,28 +103,31 @@ class DiffusionUncond(pl.LightningModule):
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
-
         
-        if self.pqmf_bands > 1:
-            reals = self.pqmf(reals)
-
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
+        #print(f't: {t}')
+
+        t = get_crash_schedule(t)
+
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+        alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
         sigmas = sigmas[:, None, None]
         noise = torch.randn_like(reals)
+        #print(f'noise: {noise}')
         noised_reals = reals * alphas + noise * sigmas
         targets = noise * alphas - reals * sigmas
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t)
+            #print(v)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
+            #print(loss)
 
         log_dict = {
             'train/loss': loss.detach(),
@@ -153,10 +154,7 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.sample_rate = global_args.sample_rate
-        self.pqmf_bands = global_args.pqmf_bands
-
-        if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+        
 
     @rank_zero_only
     @torch.no_grad()
@@ -169,16 +167,10 @@ class DemoCallback(pl.Callback):
         
         last_demo_step = trainer.global_step
         
-        if self.pqmf_bands > 1:
-            noise = torch.randn([self.num_demos, 2*self.pqmf_bands, self.demo_samples//self.pqmf_bands]).to(module.device)
-        else:
-            noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
+        noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
 
         try:
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1)
-
-            if self.pqmf_bands > 1:
-                fakes = self.pqmf.inverse(fakes.cpu())
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0)
 
             # Put the demos together
             fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -226,8 +218,7 @@ def main():
     diffusion_trainer = pl.Trainer(
         gpus=args.num_gpus,
         accelerator="gpu",
-        #devices= args.num_gpus,
-        #num_nodes = args.num_nodes,
+        num_nodes = args.num_nodes,
         strategy='ddp',
         precision=16,
         accumulate_grad_batches=args.accum_batches, 
@@ -241,4 +232,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

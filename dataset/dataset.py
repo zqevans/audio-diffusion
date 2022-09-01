@@ -13,6 +13,42 @@ from functools import partial
 from einops import rearrange
 from udls import SimpleLMDBDataset
 
+def fast_scandir(
+    dir:str,  # top-level directory at which to begin scanning
+    ext:list  # list of allowed file extensions
+    ):
+    "very fast `glob` alternative. from https://stackoverflow.com/a/59803793/4259243"
+    subfolders, files = [], []
+    ext = ['.'+x if x[0]!='.' else x for x in ext]  # add starting period to extensions if needed
+    try: # hope to avoid 'permission denied' by this try
+        for f in os.scandir(dir):
+            try: # 'hope to avoid too many levels of symbolic links' error
+                if f.is_dir():
+                    subfolders.append(f.path)
+                elif f.is_file():
+                    if os.path.splitext(f.name)[1].lower() in ext:
+                        files.append(f.path)
+            except:
+                pass 
+    except:
+        pass
+
+    for dir in list(subfolders):
+        sf, f = fast_scandir(dir, ext)
+        subfolders.extend(sf)
+        files.extend(f)
+    return subfolders, files
+
+def get_audio_filenames(
+    paths:list   # directories in which to search
+    ):
+    "recursively get a list of audio filenames"
+    filenames = []
+    if type(paths) is str: paths = [paths]
+    for path in paths:               # get a list of relevant filenames
+        subfolders, files = fast_scandir(path, ['.wav','.flac','.ogg','.aiff','.aif','.mp3'])
+        filenames.extend(files)
+    return filenames
 
 class SampleDataset(torch.utils.data.Dataset):
   def __init__(self, paths, global_args):
@@ -34,9 +70,13 @@ class SampleDataset(torch.utils.data.Dataset):
       Stereo()
     )
 
-    for path in paths:
-      for ext in ['wav','flac','ogg','aiff','aif','mp3']:
-        self.filenames += glob(f'{path}/**/*.{ext}', recursive=True)
+    # for path in paths:
+    #   for ext in ['wav','flac','ogg','aiff','aif','mp3']:
+    #     self.filenames += fast_scandir(path, ext) #glob(f'{path}/**/*.{ext}', recursive=True)
+
+    self.filenames = get_audio_filenames(paths)
+
+    print(f'Found {len(self.filenames)} files')
 
     self.sr = global_args.sample_rate
     if hasattr(global_args,'load_frac'):
@@ -48,7 +88,6 @@ class SampleDataset(torch.utils.data.Dataset):
     self.cache_training_data = global_args.cache_training_data
 
     if self.cache_training_data: self.preload_files()
-
 
   def load_file(self, filename):
     audio, sr = torchaudio.load(filename)

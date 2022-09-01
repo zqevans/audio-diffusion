@@ -23,6 +23,7 @@ import wandb
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from encoders.encoders import AttnResEncoder1D
+from autoencoders.soundstream import SoundStreamXLEncoder
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
@@ -54,7 +55,10 @@ def sample(model, x, steps, eta, logits):
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+
+    t = get_crash_schedule(t)
+    
+    alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
     for i in trange(steps):
@@ -98,9 +102,29 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=9, n_attn_layers=0)
+        capacity = 32
+
+        c_mults = [2, 4, 8, 16, 32]
+        
+        strides = [4, 4, 2, 2, 2]
+
+        self.encoder = SoundStreamXLEncoder(
+            in_channels=2*global_args.pqmf_bands, 
+            capacity=capacity, 
+            latent_dim=global_args.latent_dim,
+            c_mults = c_mults,
+            strides = strides
+        )
         self.encoder_ema = deepcopy(self.encoder)
-        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=0, c_mults=[128, 256, 256] + [512]*12, depth=12)
+
+        self.diffusion = DiffusionAttnUnet1D(
+            io_channels=2, 
+            cond_dim = global_args.latent_dim, 
+            pqmf_bands = global_args.pqmf_bands, 
+            n_attn_layers=4, 
+            c_mults=[256, 256]+[512]*12
+        )
+
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -150,8 +174,10 @@ class DiffusionDVAE(pl.LightningModule):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
+        t = get_crash_schedule(t)
+
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+        alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
@@ -172,6 +198,8 @@ class DiffusionDVAE(pl.LightningModule):
             tokens, _ = self.quantizer(tokens)
 
             tokens = rearrange(tokens, 'b n d -> b d n')
+        
+        tokens = torch.tanh(tokens)
 
         # p = torch.rand([tokens.shape[0], 1], device=tokens.device)
         # tokens = torch.where(p > 0.2, tokens, torch.zeros_like(tokens))
@@ -248,11 +276,12 @@ class DemoCallback(pl.Callback):
 
                 #Rearrange for Memcodes
                 tokens = rearrange(tokens, 'b d n -> b n d')
-
                 tokens, _= module.quantizer_ema(tokens)
                 tokens = rearrange(tokens, 'b n d -> b d n')
+            
+            tokens = torch.tanh(tokens)
 
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, tokens)
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0, tokens)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
