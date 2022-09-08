@@ -23,7 +23,7 @@ setup(
         'transformers',
         'vector-quantize-pytorch',
         'wandb',
-        'jukebox @ git+https://github.com/drscotthawley/jukebox.git',
+ #       'jukebox @ git+https://github.com/drscotthawley/jukebox.git',
         'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git',
         'udls @ git+https://github.com/caillonantoine/UDLS.git',
     ],
