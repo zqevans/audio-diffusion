@@ -157,21 +157,12 @@ class SoundStreamXLDecoder(nn.Module):
             layers.append(DecoderBlock(in_channels=c_mults[i]*capacity, out_channels=c_mults[i-1]*capacity, stride=strides[i-1]))
             layers.append(nn.ELU())
 
+        layers.append(CausalConv1d(in_channels=c_mults[0] * capacity, out_channels=out_channels, kernel_size=7))
+
         self.layers = nn.Sequential(*layers)
 
-        self.wave_gen = CausalConv1d(in_channels=c_mults[0] * capacity, out_channels=out_channels, kernel_size=7)
-        self.env_gen = CausalConv1d(in_channels=c_mults[0] * capacity, out_channels=1, kernel_size=1)
-    
     def forward(self, x):
-        last_hidden = self.layers(x)
-        wave = self.wave_gen(last_hidden)
-        env = self.env_gen(last_hidden)
-
-        env = env.reshape(x.shape[0], 1, -1)
-
-        waveform = torch.tanh(wave) * mod_sigmoid(env)
-
-        return waveform
+        return self.layers(x)
 
 
 # class SoundStreamXL(nn.Module):

@@ -6,6 +6,8 @@ from copy import deepcopy
 import math
 from pathlib import Path
 
+import json
+
 import sys
 import torch
 from torch import optim, nn
@@ -14,18 +16,18 @@ from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from einops import rearrange
+from einops import rearrange, repeat
 
-from diffusion.pqmf import CachedPQMF as PQMF
 import torchaudio
-
-import auraloss
 
 import wandb
 
 from dataset.dataset import SampleDataset
+from diffusion.pqmf import CachedPQMF as PQMF
 
-from decoders.diffusion_decoder import DiffusionAttnUnet1D
+from nwt_pytorch import Memcodes
+from dvae.residual_memcodes import ResidualMemcodes
+from decoders.diffusion_decoder import AudioDenoiserModel
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -47,14 +49,14 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta):
+def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
 
-    #t = get_crash_schedule(t)
+    t = get_crash_schedule(t)
 
     alphas, sigmas = get_alphas_sigmas(t)
 
@@ -63,7 +65,7 @@ def sample(model, x, steps, eta):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i]).float()
+            v = model(x, ts * t[i], mapping_cond=mapping_cond, unet_cond=unet_cond, log_sigma=False).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -90,32 +92,43 @@ def sample(model, x, steps, eta):
     return pred
 
 class DiffusionUncond(pl.LightningModule):
-    def __init__(self, global_args):
+    def __init__(self, model_config):
         super().__init__()
-        #self.diffusion = DiffusionAttnUnet1D(io_channels=2, pqmf_bands=global_args.pqmf_bands, n_attn_layers=4)
 
-        self.diffusion = DiffusionAttnUnet1D(
-            io_channels=2, 
-            pqmf_bands = global_args.pqmf_bands, 
-            depth=10,
-            n_attn_layers=4,
-            c_mults=[256] + [512] * 9
+        self.pqmf_bands = model_config['pqmf_bands']
+
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, self.pqmf_bands)
+  
+        #size = model_config['input_size'] # Input size is determined by global_args.sample_size instead
+
+        self.diffusion = AudioDenoiserModel(
+            model_config['input_channels'] * model_config['pqmf_bands'],
+            model_config['mapping_out'],
+            model_config['depths'],
+            model_config['channels'],
+            model_config['self_attn_depths'],
+            model_config['strides'],
+            dropout_rate=model_config['dropout_rate'],
         )
-
         self.diffusion_ema = deepcopy(self.diffusion)
-        self.rng = torch.quasirandom.SobolEngine(1, scramble=True, seed=global_args.seed)
-        self.ema_decay = global_args.ema_decay
-        
+
+        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.ema_decay = model_config['ema_decay']
+
     def configure_optimizers(self):
         return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
+
+        if self.pqmf_bands > 1:
+            reals = self.pqmf(reals)
         
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
-        #t = get_crash_schedule(t)
+        t = get_crash_schedule(t)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
@@ -128,7 +141,7 @@ class DiffusionUncond(pl.LightningModule):
         targets = noise * alphas - reals * sigmas
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t)
+            v = self.diffusion(noised_reals, t, log_sigma=False)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -150,34 +163,39 @@ class ExceptionCallback(pl.Callback):
 
 
 class DemoCallback(pl.Callback):
-    def __init__(self, global_args):
+    def __init__(self, global_args, model_config):
         super().__init__()
         self.demo_every = global_args.demo_every
-        self.num_demos = global_args.num_demos
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
-        self.sample_rate = global_args.sample_rate
-        
+        self.sample_rate = model_config["sample_rate"]
+        self.num_demos = global_args.num_demos
+
+        self.pqmf_bands = model_config["pqmf_bands"]
+
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, self.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
-    #def on_train_epoch_end(self, trainer, module):
-    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):        
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):   
         last_demo_step = -1
         if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
-        #if trainer.current_epoch % self.demo_every != 0:
             return
         
         last_demo_step = trainer.global_step
-        
-        noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
+
+        noise = torch.randn([self.num_demos, 2*self.pqmf_bands, self.demo_samples//self.pqmf_bands]).to(module.device)
+
+        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0)
+
+        if self.pqmf_bands > 1:
+            fakes = self.pqmf.inverse(fakes.cpu())
+
+        # Put the demos together
+        fakes = rearrange(fakes, 'b d n -> d (b n)')
 
         try:
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0)
-
-            # Put the demos together
-            fakes = rearrange(fakes, 'b d n -> d (b n)')
-
             log_dict = {}
             
             filename = f'demo_{trainer.global_step:08}.wav'
@@ -189,9 +207,7 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Reconstructed')
         
-
             log_dict[f'demo_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
-
 
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
@@ -201,20 +217,24 @@ def main():
 
     args = get_all_args()
 
-    args.latent_dim = 0
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
     torch.manual_seed(args.seed)
+
+    model_config = json.load(open(args.model_config))
+
+    args.sample_size = model_config["input_size"]
+    args.sample_rate = model_config["sample_rate"]
 
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
+    
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(args)
-    diffusion_model = DiffusionUncond(args)
+    demo_callback = DemoCallback(args, model_config)
+    diffusion_model = DiffusionUncond(model_config)
     wandb_logger.watch(diffusion_model)
     push_wandb_config(wandb_logger, args)
 
@@ -235,3 +255,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

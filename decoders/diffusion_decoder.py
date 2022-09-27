@@ -1,9 +1,11 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from blocks.blocks import DBlock, MappingNet, SkipBlock, FourierFeatures, UBlock, UNet, expand_to_planes, SelfAttention1d, ResConvBlock, Downsample1d, Upsample1d
+from functools import partial
+from blocks.blocks import DBlock, MappingNet, SkipBlock, FourierFeatures, UBlock, UNet, expand_to_planes, SelfAttention1d, ResConvBlock,OutConvBlock, Downsample1d, Upsample1d, Downsample1d_2, Upsample1d_2
 from blocks.utils import append_dims
 from diffusion.pqmf import CachedPQMF as PQMF
+from einops.layers.torch import Rearrange
 
 class DiffusionResConvUnet(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -57,7 +59,10 @@ class DiffusionAttnUnet1D(nn.Module):
         n_attn_layers = 6,
         c_mults = [128, 128, 256, 256] + [512] * 10,
         cond_dim = 0,
-        pqmf_bands = 1
+        pqmf_bands = 1,
+        kernel_size = 5,
+        learned_resample = False,
+        strides = [2] * 14
     ):
         super().__init__()
 
@@ -72,15 +77,16 @@ class DiffusionAttnUnet1D(nn.Module):
 
         block = nn.Identity()
 
-        conv_block = ResConvBlock
+        conv_block = partial(ResConvBlock, kernel_size=kernel_size)
 
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
+            stride = strides[i-1]
             if i > 1:
                 c_prev = c_mults[i - 2]
                 add_attn = i >= attn_layer and n_attn_layers > 0
                 block = SkipBlock(
-                    Downsample1d("cubic"),
+                    Downsample1d_2(c_prev, c_prev, stride) if learned_resample else Downsample1d("cubic"),
                     conv_block(c_prev, c, c),
                     SelfAttention1d(
                         c, c // 32) if add_attn else nn.Identity(),
@@ -100,13 +106,13 @@ class DiffusionAttnUnet1D(nn.Module):
                     conv_block(c, c, c_prev),
                     SelfAttention1d(c_prev, c_prev //
                                     32) if add_attn else nn.Identity(),
-                    Upsample1d(kernel="cubic")
+                    Upsample1d_2(c_prev, c_prev, stride) if learned_resample else Upsample1d(kernel="cubic")
                     # nn.Upsample(scale_factor=2, mode='linear',
                     #             align_corners=False),
                 )
             else:
                 block = nn.Sequential(
-                    conv_block(io_channels * self.pqmf_bands + 16 + cond_dim, c, c),
+                    conv_block((io_channels * self.pqmf_bands + cond_dim) + 16, c, c),
                     conv_block(c, c, c),
                     conv_block(c, c, c),
                     block,
@@ -116,30 +122,33 @@ class DiffusionAttnUnet1D(nn.Module):
                 )
         self.net = block
 
+        if self.pqmf_bands > 1:
+            self.post_net = OutConvBlock(io_channels, io_channels * 4, io_channels, is_last=True)
+
         with torch.no_grad():
             for param in self.net.parameters():
                 param *= 0.5
 
-    def forward(self, input, t, cond=None):
+    def forward(self, x, t, cond=None):
 
         if self.pqmf_bands > 1:
-            input = self.pqmf(input)
+            x = self.pqmf(x)
 
-        timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), input.shape)
+        timestep_embed = expand_to_planes(self.timestep_embed(t[:, None]), x.shape)
         
-        inputs = [input, timestep_embed]
+        inputs = [x, timestep_embed]
 
         if cond is not None:
-            cond = F.interpolate(cond, (input.shape[2], ), mode='linear', align_corners=False)
+            cond = F.interpolate(cond, (x.shape[2], ), mode='linear', align_corners=False)
             inputs.append(cond)
 
         outputs = self.net(torch.cat(inputs, dim=1))
 
         if self.pqmf_bands > 1:
             outputs = self.pqmf.inverse(outputs)
+            outputs = self.post_net(outputs)
 
         return outputs
-
 
 class AudioDenoiserModel(nn.Module):
     def __init__(
@@ -149,9 +158,10 @@ class AudioDenoiserModel(nn.Module):
         depths, 
         channels,
         self_attn_depths,
+        strides,
         mapping_cond_dim=0,
         unet_cond_dim=0,
-        dropout_rate=0.
+        dropout_rate=0.,
     ):
         super().__init__()
         self.timestep_embed = FourierFeatures(1, feats_in)
@@ -165,12 +175,14 @@ class AudioDenoiserModel(nn.Module):
         d_blocks, u_blocks = [], []
         for i in range(len(depths)):
             my_c_in = channels[i] if i==0 else channels[i-1]
-            d_blocks.append(DBlock(depths[i], feats_in, my_c_in, channels[i], channels[i], downsample=i>0, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
+            my_stride = 1 if i==0 else strides[i-1]
+            d_blocks.append(DBlock(depths[i], feats_in, my_c_in, channels[i], channels[i], downsample_ratio=my_stride, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
 
         for i in range(len(depths)):
             my_c_in = channels[i] * 2 if i < len(depths) - 1 else channels[i]
             my_c_out = channels[i] if i == 0 else channels[i - 1]
-            u_blocks.append(UBlock(depths[i], feats_in, my_c_in, channels[i], my_c_out, upsample=i > 0, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
+            my_stride = 1 if i==0 else strides[i-1]
+            u_blocks.append(UBlock(depths[i], feats_in, my_c_in, channels[i], my_c_out, upsample_ratio=my_stride, self_attn=self_attn_depths[i], dropout_rate=dropout_rate))
         self.u_net = UNet(d_blocks, reversed(u_blocks))
 
     def forward(self, input, sigma, mapping_cond=None, unet_cond=None, log_sigma = True):
@@ -203,13 +215,13 @@ class Denoiser(nn.Module):
         c_in = 1 / (sigma**2 + self.sigma_data**2)**0.5
         return c_skip, c_out, c_in
 
-    def loss(self, input, noise, sigma, **kwargs):
-        c_skip, c_out, c_in = [append_dims(x, input.ndim) for x in self.get_scalings(sigma)]
-        noised_input = input + noise * append_dims(sigma, input.ndim)
+    def loss(self, x, noise, sigma, **kwargs):
+        c_skip, c_out, c_in = [append_dims(x, x.ndim) for x in self.get_scalings(sigma)]
+        noised_input = x + noise * append_dims(sigma, x.ndim)
         model_output = self.inner_model(noised_input * c_in, sigma, **kwargs)
-        target = (input - c_skip * noised_input) / c_out
+        target = (x - c_skip * noised_input) / c_out
         return (model_output - target).pow(2).flatten(1).mean(1)
 
-    def forward(self, input, sigma, **kwargs):
-        c_skip, c_out, c_in = [append_dims(x, input.ndim) for x in self.get_scalings(sigma)]
-        return self.inner_model(input * c_in, sigma, **kwargs) * c_out + input * c_skip
+    def forward(self, x, sigma, **kwargs):
+        c_skip, c_out, c_in = [append_dims(x, x.ndim) for x in self.get_scalings(sigma)]
+        return self.inner_model(x * c_in, sigma, **kwargs) * c_out + x * c_skip

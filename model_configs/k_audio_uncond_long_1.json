@@ -1,0 +1,22 @@
+{
+    "type": "audio_v1",
+    "input_channels": 2,
+    "input_size": 524288,
+    "sample_rate": 12000,
+    "pqmf_bands": 16,
+    "mapping_out": 128,
+    "depths":   [2, 2, 2, 3, 3, 3, 4, 4],
+    "strides":  [4, 4, 4, 2, 2, 2, 2],
+    "channels": [256, 256, 512, 512, 512, 512, 512, 512],
+    "self_attn_depths": [false, false, false, false, false, true, true, true],
+    "dropout_rate": 0.0,
+    "ema_decay":0.995,
+    "sigma_data": 0.25,
+    "sigma_min": 1e-2,
+    "sigma_max": 3,
+    "sigma_sample_density": {
+        "type": "lognormal",
+        "mean": -1.2,
+        "std": 1.2
+    }
+}

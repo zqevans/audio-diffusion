@@ -8,9 +8,9 @@ import numpy as np
 from einops import rearrange
 
 from cached_conv import get_padding
-from cached_conv import USE_BUFFER_CONV, CachedConv1d, Conv1d
+from cached_conv import USE_BUFFER_CONV, Conv1d #, CachedConv1d
 
-Conv1d = CachedConv1d if USE_BUFFER_CONV else Conv1d
+#Conv1d = CachedConv1d if USE_BUFFER_CONV else Conv1d
 
 
 def reverse_half(x):

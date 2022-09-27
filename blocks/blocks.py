@@ -64,16 +64,27 @@ class AdaGN(ConditionedModule):
         return torch.addcmul(utils.append_dims(bias, input.ndim), input, utils.append_dims(weight, input.ndim) + 1)
 
 class ResConvBlock(ResidualBlock):
-    def __init__(self, c_in, c_mid, c_out, is_last=False):
+    def __init__(self, c_in, c_mid, c_out, is_last=False, kernel_size=5):
         skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
         super().__init__([
-            nn.Conv1d(c_in, c_mid, 5, padding=2),
+            nn.Conv1d(c_in, c_mid, kernel_size, padding=kernel_size//2),
             nn.GroupNorm(1, c_mid),
             nn.GELU(),
-            nn.Conv1d(c_mid, c_out, 5, padding=2),
+            nn.Conv1d(c_mid, c_out, kernel_size, padding=kernel_size//2),
             nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
             nn.GELU() if not is_last else nn.Identity(),
         ], skip)
+
+class OutConvBlock(nn.Sequential):
+    def __init__(self, c_in, c_mid, c_out, is_last=False, kernel_size=5):
+        super().__init__(
+            nn.Conv1d(c_in, c_mid, kernel_size, padding=kernel_size//2),
+            nn.GroupNorm(1, c_mid),
+            nn.GELU(),
+            nn.Conv1d(c_mid, c_out, kernel_size, padding=kernel_size//2),
+            nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
+            nn.GELU() if not is_last else nn.Identity(),
+        )
 
 class ResModConvBlock(ConditionedResidualBlock):
     def __init__(self, feats_in, c_in, c_mid, c_out, group_size=32, dropout_rate=0.):
@@ -200,12 +211,55 @@ class Upsample1d(nn.Module):
         weight[indices, indices] = self.kernel.to(weight)
         return F.conv_transpose1d(x, weight, stride=2, padding=self.pad * 2 + 1)
 
+def Downsample1d_2(
+    in_channels: int, out_channels: int, factor: int, kernel_multiplier: int = 2
+) -> nn.Module:
+    assert kernel_multiplier % 2 == 0, "Kernel multiplier must be even"
+
+    return nn.Conv1d(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        kernel_size=factor * kernel_multiplier + 1,
+        stride=factor,
+        padding=factor * (kernel_multiplier // 2),
+    )
+
+
+def Upsample1d_2(
+    in_channels: int, out_channels: int, factor: int, use_nearest: bool = False
+) -> nn.Module:
+
+    if factor == 1:
+        return nn.Conv1d(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1
+        )
+
+    if use_nearest:
+        return nn.Sequential(
+            nn.Upsample(scale_factor=factor, mode="nearest"),
+            nn.Conv1d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=3,
+                padding=1,
+            ),
+        )
+    else:
+        return nn.ConvTranspose1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=factor * 2,
+            stride=factor,
+            padding=factor // 2 + factor % 2,
+            output_padding=factor % 2,
+        )
+
 
 # U-Nets
 
 class DBlock(ConditionedSequential):
-    def __init__(self, n_layers, feats_in, c_in, c_mid, c_out, group_size=32, head_size=64, dropout_rate=0., downsample=False, self_attn=False):
-        modules = [Downsample1d()] if downsample else []
+    def __init__(self, n_layers, feats_in, c_in, c_mid, c_out, group_size=32, head_size=64, dropout_rate=0., downsample_ratio=1, self_attn=False):
+        modules = [Downsample1d_2(c_in, c_in, downsample_ratio)] if downsample_ratio > 1 else []
         for i in range(n_layers):
             my_c_in = c_in if i == 0 else c_mid
             my_c_out = c_mid if i < n_layers - 1 else c_out
@@ -217,7 +271,7 @@ class DBlock(ConditionedSequential):
 
 
 class UBlock(ConditionedSequential):
-    def __init__(self, n_layers, feats_in, c_in, c_mid, c_out, group_size=32, head_size=64, dropout_rate=0., upsample=False, self_attn=False):
+    def __init__(self, n_layers, feats_in, c_in, c_mid, c_out, group_size=32, head_size=64, dropout_rate=0., upsample_ratio=1, self_attn=False):
         modules = []
         for i in range(n_layers):
             my_c_in = c_in if i == 0 else c_mid
@@ -226,8 +280,8 @@ class UBlock(ConditionedSequential):
             if self_attn:
                 norm = lambda c_in: AdaGN(feats_in, c_in, max(1, my_c_out // group_size))
                 modules.append(SelfAttentionMod1d(my_c_out, max(1, my_c_out // head_size), norm, dropout_rate))
-        if upsample:
-            modules.append(Upsample1d())
+        if upsample_ratio > 1:
+            modules.append(Upsample1d_2(c_out, c_out, upsample_ratio))
         super().__init__(*modules)
 
     def forward(self, input, cond, skip=None):
@@ -252,11 +306,11 @@ class UNet(ConditionedModule):
         self.d_blocks = nn.ModuleList(d_blocks)
         self.u_blocks = nn.ModuleList(u_blocks)
 
-    def forward(self, input, cond):
+    def forward(self, x, cond):
         skips = []
         for block in self.d_blocks:
-            input = block(input, cond)
-            skips.append(input)
+            x = block(x, cond)
+            skips.append(x)
         for i, (block, skip) in enumerate(zip(self.u_blocks, reversed(skips))):
-            input = block(input, cond, skip if i > 0 else None)
-        return input
+            x = block(x, cond, skip if i > 0 else None)
+        return x

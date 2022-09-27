@@ -106,7 +106,7 @@ def main():
 
     accelerator = accelerate.Accelerator()
     device = accelerator.device
-    rng = torch.quasirandom.SobolEngine(1, scramble=True)
+    rng = torch.quasirandom.SobolEngine(1, scramble=True, seed=args.seed)
     print('Using device:', device, flush=True)
 
     diffusion_model = DiffusionAttnUnet1D(args, io_channels=2*args.pqmf_bands, n_attn_layers = 4)
@@ -124,7 +124,7 @@ def main():
 
     opt = optim.Adam([*diffusion_model.parameters()], lr=4e-5)
 
-    sched = utils.InverseLR(opt, inv_gamma=20000, power=1.0, warmup=0.99)
+    #sched = utils.InverseLR(opt, inv_gamma=20000, power=1.0, warmup=0.99)
     ema_sched = utils.EMAWarmup(power=2/3, max_value=0.9999)
 
     train_set = SampleDataset([args.training_dir], args)
@@ -143,7 +143,7 @@ def main():
         accelerator.unwrap_model(diffusion_model).load_state_dict(ckpt['model'])
         accelerator.unwrap_model(diffusion_model_ema).load_state_dict(ckpt['model_ema'])
         opt.load_state_dict(ckpt['opt'])
-        sched.load_state_dict(ckpt['sched'])
+        #sched.load_state_dict(ckpt['sched'])
         ema_sched.load_state_dict(ckpt['ema_sched'])
         epoch = ckpt['epoch'] + 1
         step = ckpt['step'] + 1
@@ -161,7 +161,7 @@ def main():
 
         noise = torch.randn([args.num_demos, 2, args.sample_size]).to(device)
 
-        fakes = sample(model_ema, noise, args.demo_steps, 0)
+        fakes = sample(model_ema, noise, args.demo_steps, 1)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -195,7 +195,7 @@ def main():
             'model': accelerator.unwrap_model(diffusion_model).state_dict(),
             'model_ema': accelerator.unwrap_model(diffusion_model_ema).state_dict(),
             'opt': opt.state_dict(),
-            'sched': sched.state_dict(),
+            #'sched': sched.state_dict(),
             'ema_sched': ema_sched.state_dict(),
             'epoch': epoch,
             'step': step
@@ -211,6 +211,8 @@ def main():
                  # Draw uniformly distributed continuous timesteps
                 t = rng.draw(reals.shape[0])[:, 0].to(device)
 
+                print(f't: {t}')
+
                 t = get_crash_schedule(t)
 
                 # Calculate the noise schedule parameters for those timesteps
@@ -220,17 +222,20 @@ def main():
                 alphas = alphas[:, None, None]
                 sigmas = sigmas[:, None, None]
                 noise = torch.randn_like(reals)
+                print(f'noise: {noise}')
                 noised_reals = reals * alphas + noise * sigmas
                 targets = noise * alphas - reals * sigmas
 
                 with torch.cuda.amp.autocast():
                     v = diffusion_model(noised_reals, t)
+                    print(v)
                     mse_loss = F.mse_loss(v, targets)
                     loss = mse_loss
+                    print(loss)
 
                 accelerator.backward(loss)
                 opt.step()
-                sched.step()
+                #sched.step()
                 opt.zero_grad()
 
                 #if accelerator.sync_gradients:
@@ -253,7 +258,7 @@ def main():
                             'mse_loss': mse_loss.detach(),
                             'epoch': epoch,
                             'loss': loss.item(),
-                            'lr': sched.get_last_lr()[0],
+                            #'lr': sched.get_last_lr()[0],
                             'ema_decay': ema_decay,
                         }
                         wandb.log(log_dict, step=step)

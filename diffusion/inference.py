@@ -1,5 +1,6 @@
 from tqdm import trange
 import torch
+from functools import partial
 from .utils import get_alphas_sigmas
 
 import math
@@ -70,6 +71,24 @@ def get_sigmas_exponential(n, sigma_min, sigma_max, device='cpu'):
     """Constructs an exponential noise schedule."""
     sigmas = torch.linspace(math.log(sigma_max), math.log(sigma_min), n, device=device).exp()
     return torch.cat([sigmas, sigmas.new_zeros([1])])
+
+def make_sample_density(config):
+    config = config['sigma_sample_density']
+    if config['type'] == 'lognormal':
+        loc = config['mean'] if 'mean' in config else config['loc']
+        scale = config['std'] if 'std' in config else config['scale']
+        return partial(utils.rand_log_normal, loc=loc, scale=scale)
+    if config['type'] == 'loglogistic':
+        loc = config['loc']
+        scale = config['scale']
+        min_value = config['min_value'] if 'min_value' in config else 0.
+        max_value = config['max_value'] if 'max_value' in config else float('inf')
+        return partial(utils.rand_log_logistic, loc=loc, scale=scale, min_value=min_value, max_value=max_value)
+    if config['type'] == 'loguniform':
+        min_value = config['min_value']
+        max_value = config['max_value']
+        return partial(utils.rand_log_uniform, min_value=min_value, max_value=max_value)
+    raise ValueError('Unknown sample density type')
 
 
 def to_d(x, sigma, denoised):

@@ -15,19 +15,20 @@ from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from einops import rearrange
-
-from diffusion.pqmf import CachedPQMF as PQMF
+import numpy as np
 import torchaudio
-
-import auraloss
 
 import wandb
 
-from dataset.dataset import SampleDataset
+from diffusion.pqmf import CachedPQMF as PQMF
+from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
+
+from quantizer_pytorch import Quantizer1d
 
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
-from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
+from aeiou.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
+from aeiou.datasets import AudioDataset
 
 
 # Define the noise schedule and sampling loop
@@ -53,8 +54,6 @@ def sample(model, x, steps, eta):
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-
-    #t = get_crash_schedule(t)
 
     alphas, sigmas = get_alphas_sigmas(t)
 
@@ -89,33 +88,104 @@ def sample(model, x, steps, eta):
     # If we are on the last timestep, output the denoised image
     return pred
 
-class DiffusionUncond(pl.LightningModule):
+class AudioAutoencoder(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
-        #self.diffusion = DiffusionAttnUnet1D(io_channels=2, pqmf_bands=global_args.pqmf_bands, n_attn_layers=4)
+
+        self.latent_dim = global_args.latent_dim
+        
+        self.pqmf_bands = global_args.pqmf_bands
+
+        if self.pqmf_bands > 1:
+            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+
+        capacity = 64
+
+        c_mults = [2, 4, 8, 16, 32]
+        
+        strides = [2, 2, 2, 2, 2]
+
+        self.downsampling_ratio = np.prod(strides)
+
+        self.encoder = SoundStreamXLEncoder(
+            in_channels=2*global_args.pqmf_bands, 
+            capacity=capacity, 
+            latent_dim=global_args.latent_dim,
+            c_mults = c_mults,
+            strides = strides
+        )
+
+        self.decoder = SoundStreamXLDecoder(
+            out_channels=2*global_args.pqmf_bands, 
+            capacity=capacity, 
+            latent_dim=global_args.latent_dim,
+            c_mults = c_mults,
+            strides = strides
+            )
+
+        self.quantizer = None
+
+        self.num_residuals = global_args.num_residuals
+        if self.num_residuals > 0:
+            self.quantizer = Quantizer1d(
+                channels = global_args.latent_dim,
+                num_groups = 1,
+                codebook_size = global_args.codebook_size,
+                num_residuals = self.num_residuals,
+                shared_codebook = False,
+                expire_threshold=0.5
+            )
+
+    def encode(self, audio, with_info = False):
+        return torch.tanh(self.encoder(audio))
+
+    def decode(self, latents):
+        if self.quantizer:
+            latents, _ = self.quantizer(latents)
+        return self.decoder(latents)
+
+class LatentAudioDiffusion(pl.LightningModule):
+    def __init__(self, global_args, autoencoder: AudioAutoencoder):
+        super().__init__()
+
+        self.encoder = autoencoder.encoder
+        
+        self.latent_dim = autoencoder.latent_dim
+        self.downsampling_ratio = autoencoder.downsampling_ratio
 
         self.diffusion = DiffusionAttnUnet1D(
-            io_channels=2, 
-            pqmf_bands = global_args.pqmf_bands, 
-            depth=10,
-            n_attn_layers=4,
-            c_mults=[256] + [512] * 9
+            io_channels=self.latent_dim, 
+            n_attn_layers=4, 
+            c_mults=[512] * 6 + [1024] * 4,
+            depth=10
         )
 
         self.diffusion_ema = deepcopy(self.diffusion)
-        self.rng = torch.quasirandom.SobolEngine(1, scramble=True, seed=global_args.seed)
-        self.ema_decay = global_args.ema_decay
+
+        self.autoencoder = autoencoder
+
+        self.decoder = autoencoder.decoder
         
+        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.ema_decay = global_args.ema_decay
+
+    def encode(self, reals):
+        return self.autoencoder.encode(reals)
+
+    def decode(self, latents):
+        return self.autoencoder.decode(latents)
+
     def configure_optimizers(self):
         return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
-  
+
     def training_step(self, batch, batch_idx):
         reals = batch[0]
-        
+
+        with torch.cuda.amp.autocast():
+            latents = self.encode(reals)
+
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
-
-        #t = get_crash_schedule(t)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
@@ -123,12 +193,12 @@ class DiffusionUncond(pl.LightningModule):
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
         sigmas = sigmas[:, None, None]
-        noise = torch.randn_like(reals)
-        noised_reals = reals * alphas + noise * sigmas
-        targets = noise * alphas - reals * sigmas
+        noise = torch.randn_like(latents)
+        noised_latents = latents * alphas + noise * sigmas
+        targets = noise * alphas - latents * sigmas
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t)
+            v = self.diffusion(noised_latents, t)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -153,16 +223,15 @@ class DemoCallback(pl.Callback):
     def __init__(self, global_args):
         super().__init__()
         self.demo_every = global_args.demo_every
-        self.num_demos = global_args.num_demos
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
+        self.num_demos = global_args.num_demos
         self.sample_rate = global_args.sample_rate
-        
 
     @rank_zero_only
     @torch.no_grad()
     #def on_train_epoch_end(self, trainer, module):
-    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):        
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):   
         last_demo_step = -1
         if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
         #if trainer.current_epoch % self.demo_every != 0:
@@ -170,16 +239,20 @@ class DemoCallback(pl.Callback):
         
         last_demo_step = trainer.global_step
         
-        noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
-
+        print("Starting demo")
         try:
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0)
+            latent_noise = torch.randn([self.num_demos, module.latent_dim, self.demo_samples//module.downsampling_ratio]).to(module.device)
+            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0)
+            noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
+            print("Decoding fakes")
+            fakes = module.decode(fake_latents)
 
             # Put the demos together
             fakes = rearrange(fakes, 'b d n -> d (b n)')
 
             log_dict = {}
             
+            print("Saving files")
             filename = f'demo_{trainer.global_step:08}.wav'
             fakes = fakes.clamp(-1, 1).mul(32767).to(torch.int16).cpu()
             torchaudio.save(filename, fakes, self.sample_rate)
@@ -192,8 +265,14 @@ class DemoCallback(pl.Callback):
 
             log_dict[f'demo_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
 
+            log_dict[f'embeddings'] = embeddings_table(fake_latents)
+            log_dict[f'embeddings_3dpca'] = pca_point_cloud(fake_latents)
+            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(fake_latents))
 
+
+            print("Done logging")
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
+
         except Exception as e:
             print(f'{type(e).__name__}: {e}', file=sys.stderr)
 
@@ -201,21 +280,28 @@ def main():
 
     args = get_all_args()
 
-    args.latent_dim = 0
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SampleDataset([args.training_dir], args)
+    train_set = AudioDataset(
+        [args.training_dir],
+        sample_rate=args.sample_rate,
+        sample_size=args.sample_size,
+        random_crop=args.random_crop,
+        augs='Stereo(), PhaseFlipper()'
+    )
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
+    
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(args)
-    diffusion_model = DiffusionUncond(args)
-    wandb_logger.watch(diffusion_model)
+    autoencoder = AudioAutoencoder.load_from_checkpoint(args.pretrained_ckpt_path, global_args=args).requires_grad_(False)
+    latent_diffusion_model = LatentAudioDiffusion(args, autoencoder)
+    wandb_logger.watch(latent_diffusion_model)
     push_wandb_config(wandb_logger, args)
 
     diffusion_trainer = pl.Trainer(
@@ -231,7 +317,8 @@ def main():
         max_epochs=10000000,
     )
 
-    diffusion_trainer.fit(diffusion_model, train_dl, ckpt_path=args.ckpt_path)
+    diffusion_trainer.fit(latent_diffusion_model, train_dl, ckpt_path=args.ckpt_path)
 
 if __name__ == '__main__':
     main()
+

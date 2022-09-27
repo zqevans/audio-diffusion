@@ -23,11 +23,11 @@ import auraloss
 
 import wandb
 
-from dataset.dataset import SampleDataset
+from aeiou.datasets import AudioDataset
 
-from decoders.diffusion_decoder import DiffusionAttnUnet1D
+from audio_diffusion_pytorch import UNet1d
 from diffusion.model import ema_update
-from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
+from aeiou.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
 
 # Define the noise schedule and sampling loop
@@ -94,12 +94,23 @@ class DiffusionUncond(pl.LightningModule):
         super().__init__()
         #self.diffusion = DiffusionAttnUnet1D(io_channels=2, pqmf_bands=global_args.pqmf_bands, n_attn_layers=4)
 
-        self.diffusion = DiffusionAttnUnet1D(
-            io_channels=2, 
-            pqmf_bands = global_args.pqmf_bands, 
-            depth=10,
-            n_attn_layers=4,
-            c_mults=[256] + [512] * 9
+        self.diffusion = UNet1d(
+            in_channels = 2, 
+            channels = 128,
+            patch_blocks = 1,
+            patch_factor = 16,
+            resnet_groups = 8,
+            kernel_multiplier_downsample = 2,
+            multipliers = [1, 2, 4, 4, 4, 4, 4, 4],
+            factors = [4, 4, 4, 2, 2, 2, 2],
+            num_blocks = [3, 2, 2, 8, 8, 8, 8],
+            attentions = [0, 0, 0, 1, 1, 1, 1, 2],
+            attention_heads = 8,
+            attention_features = 128,
+            attention_multiplier = 4,
+            use_nearest_upsample = False,
+            use_skip_scale = True,
+            use_context_time = True
         )
 
         self.diffusion_ema = deepcopy(self.diffusion)
@@ -115,7 +126,7 @@ class DiffusionUncond(pl.LightningModule):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
-        #t = get_crash_schedule(t)
+       # t = get_crash_schedule(t)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
@@ -173,7 +184,7 @@ class DemoCallback(pl.Callback):
         noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
 
         try:
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0)
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1)
 
             # Put the demos together
             fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -207,7 +218,14 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SampleDataset([args.training_dir], args)
+    train_set = AudioDataset(
+        [args.training_dir],
+        sample_rate=args.sample_rate,
+        sample_size=args.sample_size,
+        random_crop=args.random_crop,
+        augs='Stereo()'
+    )
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)

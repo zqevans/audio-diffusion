@@ -23,87 +23,34 @@ import auraloss
 
 import wandb
 
-from dataset.dataset import SampleDataset
+from aeiou.datasets import AudioDataset
 
-from decoders.diffusion_decoder import DiffusionAttnUnet1D
+from audio_diffusion_pytorch import AudioDiffusionModel
 from diffusion.model import ema_update
-from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
-
-
-# Define the noise schedule and sampling loop
-def get_alphas_sigmas(t):
-    """Returns the scaling factors for the clean image (alpha) and for the
-    noise (sigma), given a timestep."""
-    return torch.cos(t * math.pi / 2), torch.sin(t * math.pi / 2)
-
-def get_crash_schedule(t):
-    sigma = torch.sin(t * math.pi / 2) ** 2
-    alpha = (1 - sigma ** 2) ** 0.5
-    return alpha_sigma_to_t(alpha, sigma)
-
-def alpha_sigma_to_t(alpha, sigma):
-    """Returns a timestep, given the scaling factors for the clean image and for
-    the noise."""
-    return torch.atan2(sigma, alpha) / math.pi * 2
-
-@torch.no_grad()
-def sample(model, x, steps, eta):
-    """Draws samples from a model given starting noise."""
-    ts = x.new_ones([x.shape[0]])
-
-    # Create the noise schedule
-    t = torch.linspace(1, 0, steps + 1)[:-1]
-
-    #t = get_crash_schedule(t)
-
-    alphas, sigmas = get_alphas_sigmas(t)
-
-    # The sampling loop
-    for i in trange(steps):
-
-        # Get the model output (v, the predicted velocity)
-        with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i]).float()
-
-        # Predict the noise and the denoised image
-        pred = x * alphas[i] - v * sigmas[i]
-        eps = x * sigmas[i] + v * alphas[i]
-
-        # If we are not on the last timestep, compute the noisy image for the
-        # next timestep.
-        if i < steps - 1:
-            # If eta > 0, adjust the scaling factor for the predicted noise
-            # downward according to the amount of additional noise to add
-            ddim_sigma = eta * (sigmas[i + 1]**2 / sigmas[i]**2).sqrt() * \
-                (1 - alphas[i]**2 / alphas[i + 1]**2).sqrt()
-            adjusted_sigma = (sigmas[i + 1]**2 - ddim_sigma**2).sqrt()
-
-            # Recombine the predicted noise and predicted denoised image in the
-            # correct proportions for the next step
-            x = pred * alphas[i + 1] + eps * adjusted_sigma
-
-            # Add the correct amount of fresh noise
-            if eta:
-                x += torch.randn_like(x) * ddim_sigma
-
-    # If we are on the last timestep, output the denoised image
-    return pred
+from aeiou.viz import audio_spectrogram_image
 
 class DiffusionUncond(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
-        #self.diffusion = DiffusionAttnUnet1D(io_channels=2, pqmf_bands=global_args.pqmf_bands, n_attn_layers=4)
 
-        self.diffusion = DiffusionAttnUnet1D(
-            io_channels=2, 
-            pqmf_bands = global_args.pqmf_bands, 
-            depth=10,
-            n_attn_layers=4,
-            c_mults=[256] + [512] * 9
+        self.diffusion = AudioDiffusionModel(
+            in_channels = 2, 
+            channels = 256,
+            patch_blocks = 1,
+            patch_factor = 32,
+            resnet_groups = 8,
+            kernel_multiplier_downsample = 2,
+            multipliers = [1, 2, 4, 4, 4, 4, 4],
+            factors = [4, 4, 4, 2, 2, 2],
+            num_blocks = [2, 2, 2, 2, 2, 2],
+            attentions = [0, 0, 0, 1, 1, 1, 1],
+            attention_heads = 8,
+            attention_features = 128,
+            attention_multiplier = 2,
+            diffusion_sigma_data = 0.5
         )
 
         self.diffusion_ema = deepcopy(self.diffusion)
-        self.rng = torch.quasirandom.SobolEngine(1, scramble=True, seed=global_args.seed)
         self.ema_decay = global_args.ema_decay
         
     def configure_optimizers(self):
@@ -112,29 +59,14 @@ class DiffusionUncond(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         reals = batch[0]
         
-        # Draw uniformly distributed continuous timesteps
-        t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
-
-        #t = get_crash_schedule(t)
-
-        # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(t)
-
-        # Combine the ground truth images and the noise
-        alphas = alphas[:, None, None]
-        sigmas = sigmas[:, None, None]
-        noise = torch.randn_like(reals)
-        noised_reals = reals * alphas + noise * sigmas
-        targets = noise * alphas - reals * sigmas
+        batch_stdev = torch.std(batch.detach())
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t)
-            mse_loss = F.mse_loss(v, targets)
-            loss = mse_loss
+            loss = self.diffusion(reals)
 
         log_dict = {
             'train/loss': loss.detach(),
-            'train/mse_loss': mse_loss.detach(),
+            'train/data_stdev': batch_stdev
         }
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
@@ -173,7 +105,7 @@ class DemoCallback(pl.Callback):
         noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
 
         try:
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0)
+            fakes = module.diffusion_ema.sample(noise=noise, num_steps=self.demo_steps)
 
             # Put the demos together
             fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -207,7 +139,14 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SampleDataset([args.training_dir], args)
+    train_set = AudioDataset(
+        [args.training_dir],
+        sample_rate=args.sample_rate,
+        sample_size=args.sample_size,
+        random_crop=args.random_crop,
+        augs='Stereo()'
+    )
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)

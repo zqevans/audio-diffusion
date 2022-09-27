@@ -50,7 +50,7 @@ def sample(model, reals, specs, steps, eta):
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1].to(reals.device)
     specs = specs.to(reals.device)
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+    alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
     for i in trange(steps):
@@ -117,7 +117,7 @@ class FastDiffTrainer(pl.LightningModule):
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+        alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
@@ -155,12 +155,15 @@ class DemoCallback(pl.Callback):
         self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
+        self.last_demo_step = -1
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_epoch_end(self, trainer, module):
-        if trainer.current_epoch % self.demo_every != 0:
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):   
+        if (trainer.global_step - 1) % self.demo_every != 0 or self.last_demo_step == trainer.global_step:
             return
+        
+        self.last_demo_step = trainer.global_step
         
         demo_specs, demo_reals, _ = next(self.demo_dl)
 
@@ -247,23 +250,6 @@ def main():
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
-
-
-    # def collate_fn(batch):
-    #     print(len(batch))
-    #     specs = []
-    #     audios = []
-    #     filenames = []
-    #     for song in batch:
-    #         specs = specs + song[0]
-    #         audios = audios + song[1]
-    #         filenames.append(song[2])
-        
-    #     return torch.FloatTensor(audios), torch.FloatTensor(specs), filenames
-
-    # train_set = SongBatchDataset([args.training_dir], 8, args)
-    # train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True, collate_fn=collate_fn,
-    #                            num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     push_wandb_config(wandb_logger, args, omit=['training_dir'])

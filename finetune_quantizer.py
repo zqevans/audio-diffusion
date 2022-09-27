@@ -3,14 +3,14 @@
 from prefigure.prefigure import get_all_args, push_wandb_config
 from copy import deepcopy
 import math
-import random
+
 import sys
 import torch
 from torch import optim, nn
 from torch.nn import functional as F
 from torch.nn.parameter import Parameter
 from torch.utils import data
-from tqdm import trange
+from tqdm import tqdm, trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from einops import rearrange
@@ -18,8 +18,6 @@ import numpy as np
 import torchaudio
 
 import auraloss
-
-from losses.freq_losses import PerceptualSumAndDifferenceSTFTLoss
 
 import wandb
 
@@ -34,7 +32,6 @@ from diffusion.utils import PadCrop, Stereo
 from quantizer_pytorch import Quantizer1d
 
 from aeiou.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
-
 
 class AudioAutoencoder(pl.LightningModule):
     def __init__(self, global_args):
@@ -66,7 +63,7 @@ class AudioAutoencoder(pl.LightningModule):
             latent_dim=global_args.latent_dim,
             c_mults = c_mults,
             strides = strides
-        )
+            )
 
         self.quantizer = None
 
@@ -78,7 +75,7 @@ class AudioAutoencoder(pl.LightningModule):
                 codebook_size = global_args.codebook_size,
                 num_residuals = self.num_residuals,
                 shared_codebook = False,
-                expire_threshold=0.5
+                expire_threshold = 0.5
             )
 
       #  self.decoder_ema = deepcopy(self.diffusion)
@@ -92,9 +89,9 @@ class AudioAutoencoder(pl.LightningModule):
             hop_sizes.append(int(s * (1 - overlap)))
             win_lengths.append(s)
 
-        self.sdstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
+        self.mrstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
 
-    def encode(self, audio, with_info = False):
+    def encode(self, audio):
         latents = torch.tanh(self.encoder(audio))
 
         if self.quantizer:
@@ -106,7 +103,7 @@ class AudioAutoencoder(pl.LightningModule):
         return self.decoder(latents)
 
     def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=4e-5)
+        return optim.Adam([], lr=4e-5)
   
     def training_step(self, batch):
         reals = batch
@@ -118,59 +115,39 @@ class AudioAutoencoder(pl.LightningModule):
           
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            # Freeze the encoder
+            
             latents = torch.tanh(self.encoder(encoder_input).float())            
 
-            if self.quantizer:
-                latents, quantizer_info = self.quantizer(latents, num_residuals = random.randint(1, self.num_residuals))
-                quantizer_loss = quantizer_info["loss"]
-
-            decoded = self.decoder(latents)
-
-            #Add pre-PQMF loss
-            mb_distance = torch.tensor(0., device=self.device)
-
-            if self.pqmf_bands > 1:
-                mb_distance = F.mse_loss(encoder_input, decoded)
-                decoded = self.pqmf.inverse(decoded)
-
-            mrstft_loss = self.sdstft(reals, decoded)
-            loss = mrstft_loss + mb_distance
-
-            if self.quantizer:
-                loss += quantizer_loss
+            latents, quantizer_info = self.quantizer(latents)
+            quantizer_loss = quantizer_info["loss"]
+            loss = quantizer_loss
 
         log_dict = {
             'train/loss': loss.detach(),
-            'train/mb_distance': mb_distance.detach(),
-            'train/mrstft_loss': mrstft_loss.detach(),
+            'train/quantizer_loss': quantizer_loss.detach()
         }
-
-        if self.quantizer:
-            log_dict["train/quantizer_loss"] = quantizer_loss.detach()
-
-            # Log perplexity of each codebook used
-            for i, perplexity in enumerate(quantizer_info["perplexity"]):
-                log_dict[f"train_perplexity_{i}"] = perplexity
-            # Log replaced codes of each codebook used
-            for i, replaced_codes in enumerate(quantizer_info["replaced_codes"]):
-                log_dict[f"train_replaced_codes_{i}"] = replaced_codes
-            # Log budget
-            # for i, budget in enumerate(quantizer_info["budget"]):
-            #     log_dict[f"budget_{i}"] = budget
+        
+        # Log perplexity of each codebook used
+        for i, perplexity in enumerate(quantizer_info["perplexity"]):
+            log_dict[f"train_perplexity_{i}"] = perplexity
+        # Log replaced codes of each codebook used
+        for i, replaced_codes in enumerate(quantizer_info["replaced_codes"]):
+            log_dict[f"train_replaced_codes_{i}"] = replaced_codes
+        # Log budget
+        # for i, budget in enumerate(quantizer_info["budget"]):
+        #     log_dict[f"budget_{i}"] = budget
 
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return loss
 
-    def load_encoder_weights_from_diffae(self, diffae_state_dict):
+    def load_pretrained_continuous_ae(self, ae_state_dict):
         own_state = self.state_dict()
-        for name, param in diffae_state_dict.items():
-            if name.startswith("encoder_ema."):
-                new_name = name.replace("encoder_ema.", "encoder.")
+        for name, param in ae_state_dict.items():
+            if name.startswith("encoder.") or name.startswith("decoder."):
                 if isinstance(param, Parameter):
                     # backwards compatibility for serialized parameters
                     param = param.data
-                own_state[new_name].copy_(param)
+                own_state[name].copy_(param)
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -275,37 +252,61 @@ def main():
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
-    wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    demo_dl = data.DataLoader(train_set, args.num_demos, num_workers=args.num_workers, shuffle=True)
+    #wandb_logger = pl.loggers.WandbLogger(project=args.name)
+    # demo_dl = data.DataLoader(train_set, args.num_demos, num_workers=args.num_workers, shuffle=True)
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(demo_dl, args)
+    #demo_callback = DemoCallback(demo_dl, args)
 
     model = AudioAutoencoder(args)
 
-    if args.encoder_diffae_ckpt != '':
-        diffae_state_dict = torch.load(args.encoder_diffae_ckpt, map_location='cpu')['state_dict']
-        model.load_encoder_weights_from_diffae(diffae_state_dict)
-        #model.encoder.requires_grad_(False)
+    ae_state_dict = torch.load(args.pretrained_ckpt_path, map_location='cpu')['state_dict']
+    model.load_pretrained_continuous_ae(ae_state_dict)
 
-    wandb_logger.watch(model)
-    push_wandb_config(wandb_logger, args)
+    wandb.init(project=args.name, config=vars(args), save_code=True)
 
-    trainer = pl.Trainer(
-        devices=args.num_gpus,
-        accelerator="gpu",
-        num_nodes=args.num_nodes,
-        strategy='ddp',
-        precision=16,
-        accumulate_grad_batches=args.accum_batches, 
-        callbacks=[ckpt_callback, demo_callback, exc_callback],
-        logger=wandb_logger,
-        log_every_n_steps=1,
-        max_epochs=10000000,
-    )
+    model.requires_grad_(False).to("cuda")
 
-    trainer.fit(model, train_dl, ckpt_path=args.ckpt_path)
+    # wandb_logger.watch(model)
+    # push_wandb_config(wandb_logger, args)
+
+    epoch = 0
+    step = 0
+
+    while True:
+            for batch in tqdm(train_dl, disable=False):
+                batch = batch.to("cuda")
+                latents = model.encoder(batch)
+                latents, quantizer_info = model.quantizer(latents)
+
+                quantizer_loss = quantizer_info["loss"]
+
+                if step % 25 == 0:
+                    tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {quantizer_info["loss"].item():g}')
+
+                log_dict = {
+                    'epoch': epoch,
+                    'train/quantizer_loss': quantizer_loss.detach()
+                }
+        
+                # Log perplexity of each codebook used
+                for i, perplexity in enumerate(quantizer_info["perplexity"]):
+                    log_dict[f"train_perplexity_{i}"] = perplexity
+                # Log replaced codes of each codebook used
+                for i, replaced_codes in enumerate(quantizer_info["replaced_codes"]):
+                    log_dict[f"train_replaced_codes_{i}"] = replaced_codes
+
+                wandb.log(log_dict, step=step)
+
+                #     if step % args.demo_every == 0:
+                #         demo()
+
+                # if step > 0 and step % args.checkpoint_every == 0:
+                #     save()
+
+                step += 1
+            epoch += 1
 
 if __name__ == '__main__':
     main()

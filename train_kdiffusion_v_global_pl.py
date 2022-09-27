@@ -6,6 +6,8 @@ from copy import deepcopy
 import math
 from pathlib import Path
 
+import json
+
 import sys
 import torch
 from torch import optim, nn
@@ -14,7 +16,7 @@ from torch.utils import data
 from tqdm import trange
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from einops import rearrange
+from einops import rearrange, repeat
 
 import torchaudio
 
@@ -22,11 +24,12 @@ import wandb
 
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from encoders.encoders import AttnResEncoder1D
+from autoencoders.soundstream import SoundStreamXLEncoder
+from encoders.encoders import GlobalEncoder
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
-from decoders.diffusion_decoder import DiffusionAttnUnet1D
+from decoders.diffusion_decoder import AudioDenoiserModel
 from diffusion.model import ema_update
 from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -48,13 +51,15 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, logits):
+def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
+
     t = get_crash_schedule(t)
+
     alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
@@ -62,7 +67,7 @@ def sample(model, x, steps, eta, logits):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], logits).float()
+            v = model(x, ts * t[i], mapping_cond=mapping_cond, unet_cond=unet_cond, log_sigma=False).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -90,36 +95,66 @@ def sample(model, x, steps, eta, logits):
 
 
 
-class DiffusionInpaint(pl.LightningModule):
-    def __init__(self, global_args):
+class DiffusionDVAE(pl.LightningModule):
+    def __init__(self, model_config):
         super().__init__()
 
-        self.pqmf_bands = global_args.pqmf_bands
+        self.pqmf_bands = model_config['pqmf_bands']
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, 70, self.pqmf_bands)
 
-        inpaint_start_ratio = 0.75
+        self.global_encoder = GlobalEncoder(model_config['global_latent_dim'], 2*self.pqmf_bands)
 
-        self.inpaint_start_sample = int(global_args.sample_size * inpaint_start_ratio)
+        self.global_encoder_ema = deepcopy(self.global_encoder)
 
-        self.diffusion = DiffusionAttnUnet1D(global_args, n_attn_layers=6, c_mults=[256]*2 + [512]*12, depth=14)
+        self.encoder = SoundStreamXLEncoder(
+            in_channels=2*self.pqmf_bands, 
+            capacity=model_config["encoder_base_channels"], 
+            latent_dim=model_config['local_latent_dim'],
+            c_mults = model_config["encoder_c_mults"],
+            strides = model_config["encoder_strides"]
+        )
+        self.encoder_ema = deepcopy(self.encoder)
+  
+        #size = model_config['input_size'] # Input size is determined by global_args.sample_size instead
+
+        self.diffusion = AudioDenoiserModel(
+            model_config['input_channels'] * model_config['pqmf_bands'],
+            model_config['mapping_out'],
+            model_config['depths'],
+            model_config['channels'],
+            model_config['self_attn_depths'],
+            model_config['strides'],
+            dropout_rate=model_config['dropout_rate'],
+            unet_cond_dim=model_config['local_latent_dim'],
+            mapping_cond_dim=model_config['global_latent_dim'],
+        )
         self.diffusion_ema = deepcopy(self.diffusion)
-        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.ema_decay = global_args.ema_decay        
 
+        self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
+        self.ema_decay = model_config['ema_decay']
+        
+    def encode(self, *args, **kwargs):
+        if self.training:
+            return self.encoder(*args, **kwargs)
+        return self.encoder_ema(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        if self.training:
+            return self.diffusion(*args, **kwargs)
+        return self.diffusion_ema(*args, **kwargs)
 
     def configure_optimizers(self):
-        return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
-
+        return optim.Adam([*self.encoder.parameters(), *self.global_encoder.parameters(), *self.diffusion.parameters()], lr=4e-5)
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
 
-        # TODO: Make masked reals for conditioning
-        cond = reals.clone()
+        encoder_input = reals
 
-        cond[:,:,self.inpaint_start_sample:] = 0
+        if self.pqmf_bands > 1:
+            encoder_input = self.pqmf(reals)
         
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -132,12 +167,25 @@ class DiffusionInpaint(pl.LightningModule):
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
         sigmas = sigmas[:, None, None]
-        noise = torch.randn_like(reals)
-        noised_reals = reals * alphas + noise * sigmas
-        targets = noise * alphas - reals * sigmas
+        noise = torch.randn_like(encoder_input)
+        noised_reals = encoder_input * alphas + noise * sigmas
+        targets = noise * alphas - encoder_input * sigmas
+
+        # Compute the model output and the loss.
+        with torch.cuda.amp.autocast():
+            global_latent = self.global_encoder(encoder_input).float()
+
+            #Normalize the global latents
+            global_latent = F.normalize(global_latent)
+
+            if self.encoder is not None:
+                latents = self.encoder(encoder_input).float()
+                latents = torch.tanh(latents)
+
+        latents_interp = F.interpolate(latents, (noised_reals.shape[2], ), mode='linear', align_corners=False)
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, cond)
+            v = self.diffusion(noised_reals, t, mapping_cond=global_latent, unet_cond=latents_interp, log_sigma=False)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -152,7 +200,8 @@ class DiffusionInpaint(pl.LightningModule):
     def on_before_zero_grad(self, *args, **kwargs):
         decay = 0.95 if self.current_epoch < 25 else self.ema_decay
         ema_update(self.diffusion, self.diffusion_ema, decay)
-
+        ema_update(self.encoder, self.encoder_ema, decay)
+        ema_update(self.global_encoder, self.global_encoder_ema, decay)
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -160,18 +209,18 @@ class ExceptionCallback(pl.Callback):
 
 
 class DemoCallback(pl.Callback):
-    def __init__(self, demo_dl, global_args):
+    def __init__(self, demo_dl, global_args, model_config):
         super().__init__()
         self.demo_every = global_args.demo_every
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
-        self.pqmf_bands = global_args.pqmf_bands
-        self.quantized = global_args.num_quantizers > 0
+
+        self.pqmf_bands = model_config["pqmf_bands"]
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, 70, self.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
@@ -186,21 +235,34 @@ class DemoCallback(pl.Callback):
 
         demo_reals, _ = next(self.demo_dl)
 
+        encoder_input = demo_reals
+        
+        if self.pqmf_bands > 1:
+            encoder_input = self.pqmf(demo_reals)
+        
+        encoder_input = encoder_input.to(module.device)
+
         demo_reals = demo_reals.to(module.device)
 
-        cond = demo_reals.clone()
+        noise = torch.randn([demo_reals.shape[0], 2*self.pqmf_bands, self.demo_samples//self.pqmf_bands]).to(module.device)
 
-        cond[:,:,module.inpaint_start_sample:] = 0
+        with torch.no_grad():
 
-        noise = torch.randn([demo_reals.shape[0], 2, self.demo_samples]).to(module.device)
-      
-        fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, cond)
+            global_latent = module.global_encoder_ema(encoder_input)
+
+            #Normalize the global latents
+            global_latent = F.normalize(global_latent)
+
+            latents = module.encoder_ema(encoder_input)
+            latents = torch.tanh(latents)
+
+            latents_interp = F.interpolate(latents, (noise.shape[2], ), mode='linear', align_corners=False)
+
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, mapping_cond=global_latent, unet_cond=latents_interp)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
         demo_reals = rearrange(demo_reals, 'b d n -> d (b n)')
-
-        #demo_audio = torch.cat([demo_reals, fakes], -1)
 
         try:
             log_dict = {}
@@ -221,6 +283,12 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
 
+            log_dict[f'embeddings'] = embeddings_table(latents)
+
+            log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
+            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
+            log_dict[f'global_embeddings_spec'] = wandb.Image(tokens_spectrogram_image(repeat(global_latent, 'b d -> b d n', n = 100)))
+
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
 
@@ -237,7 +305,9 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    args.latent_dim = 2
+    model_config = json.load(open(args.model_config))
+
+    args.sample_size = model_config["input_size"]
 
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
@@ -247,13 +317,13 @@ def main():
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(demo_dl, args)
-    diffusion_model = DiffusionInpaint(args)
+    demo_callback = DemoCallback(demo_dl, args, model_config)
+    diffusion_model = DiffusionDVAE(model_config)
     wandb_logger.watch(diffusion_model)
     push_wandb_config(wandb_logger, args)
 
     diffusion_trainer = pl.Trainer(
-        gpus=args.num_gpus,
+        devices=args.num_gpus,
         accelerator="gpu",
         num_nodes = args.num_nodes,
         strategy='ddp',

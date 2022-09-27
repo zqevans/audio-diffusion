@@ -24,7 +24,7 @@ import wandb
 
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
-from encoders.encoders import AttnResEncoder1D
+from autoencoders.soundstream import SoundStreamXLEncoder
 
 from nwt_pytorch import Memcodes
 from dvae.residual_memcodes import ResidualMemcodes
@@ -56,7 +56,10 @@ def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
-    alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+
+    t = get_crash_schedule(t)
+
+    alphas, sigmas = get_alphas_sigmas(t)
 
     # The sampling loop
     for i in trange(steps):
@@ -92,70 +95,43 @@ def sample(model, x, steps, eta, mapping_cond=None, unet_cond=None):
 
 
 class DiffusionDVAE(pl.LightningModule):
-    def __init__(self, global_args):
+    def __init__(self, model_config):
         super().__init__()
 
-        self.pqmf_bands = global_args.pqmf_bands
+        self.pqmf_bands = model_config['pqmf_bands']
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, 70, self.pqmf_bands)
 
-        self.encoder = AttnResEncoder1D(global_args, n_io_channels=2*global_args.pqmf_bands, depth=7, n_attn_layers=0, c_mults=[512]*2 + [1024] * 5)
+        self.encoder = SoundStreamXLEncoder(
+            in_channels=2*self.pqmf_bands, 
+            capacity=model_config["encoder_base_channels"], 
+            latent_dim=model_config['local_latent_dim'],
+            c_mults = model_config["encoder_c_mults"],
+            strides = model_config["encoder_strides"]
+        )
         self.encoder_ema = deepcopy(self.encoder)
-
-        model_config = json.load(open(global_args.model_config))
   
-        
         #size = model_config['input_size'] # Input size is determined by global_args.sample_size instead
 
         self.diffusion = AudioDenoiserModel(
-            model_config['input_channels'],
+            model_config['input_channels'] * model_config['pqmf_bands'],
             model_config['mapping_out'],
             model_config['depths'],
             model_config['channels'],
             model_config['self_attn_depths'],
+            model_config['strides'],
             dropout_rate=model_config['dropout_rate'],
-            unet_cond_dim=global_args.latent_dim,
-            mapping_cond_dim=global_args.latent_dim,
+            unet_cond_dim=model_config['local_latent_dim'],
+            mapping_cond_dim=model_config['local_latent_dim'],
         )
         self.diffusion_ema = deepcopy(self.diffusion)
 
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
-        self.ema_decay = global_args.ema_decay
-        
-        self.num_quantizers = global_args.num_quantizers
-        if self.num_quantizers > 0:
-            quantizer_class = ResidualMemcodes if global_args.num_quantizers > 1 else Memcodes
-            
-            quantizer_kwargs = {}
-            if global_args.num_quantizers > 1:
-                quantizer_kwargs["num_quantizers"] = global_args.num_quantizers
-
-            self.quantizer = quantizer_class(
-                dim=global_args.latent_dim,
-                heads=global_args.num_heads,
-                num_codes=global_args.codebook_size,
-                temperature=1.,
-                **quantizer_kwargs
-            )
-
-            self.quantizer_ema = deepcopy(self.quantizer)
-
-        
-
-    def encode(self, *args, **kwargs):
-        if self.training:
-            return self.encoder(*args, **kwargs)
-        return self.encoder_ema(*args, **kwargs)
-
-    def decode(self, *args, **kwargs):
-        if self.training:
-            return self.diffusion(*args, **kwargs)
-        return self.diffusion_ema(*args, **kwargs)
+        self.ema_decay = model_config['ema_decay']
 
     def configure_optimizers(self):
         return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=4e-5)
-
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
@@ -168,8 +144,10 @@ class DiffusionDVAE(pl.LightningModule):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
+        t = get_crash_schedule(t)
+
         # Calculate the noise schedule parameters for those timesteps
-        alphas, sigmas = get_alphas_sigmas(get_crash_schedule(t))
+        alphas, sigmas = get_alphas_sigmas(t)
 
         # Combine the ground truth images and the noise
         alphas = alphas[:, None, None]
@@ -181,15 +159,6 @@ class DiffusionDVAE(pl.LightningModule):
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
             latents = self.encoder(encoder_input).float()
-
-        if self.num_quantizers > 0:
-            #Rearrange for Memcodes
-            latents = rearrange(latents, 'b d n -> b n d')
-
-            #Quantize into memcodes
-            latents, _ = self.quantizer(latents)
-
-            latents = rearrange(latents, 'b n d -> b d n')
 
         latent_mean = latents.mean(dim=-1)
 
@@ -218,37 +187,35 @@ class DiffusionDVAE(pl.LightningModule):
         ema_update(self.diffusion, self.diffusion_ema, decay)
         ema_update(self.encoder, self.encoder_ema, decay)
 
-        if self.num_quantizers > 0:
-            ema_update(self.quantizer, self.quantizer_ema, decay)
-
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
 
 
 class DemoCallback(pl.Callback):
-    def __init__(self, demo_dl, global_args):
+    def __init__(self, demo_dl, global_args, model_config):
         super().__init__()
         self.demo_every = global_args.demo_every
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
-        self.pqmf_bands = global_args.pqmf_bands
-        self.quantized = global_args.num_quantizers > 0
+        
+        self.pqmf_bands = model_config["pqmf_bands"]
 
         if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
+            self.pqmf = PQMF(2, 70, self.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_epoch_end(self, trainer, module):
-        #last_demo_step = -1
-        #if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
-        if trainer.current_epoch % self.demo_every != 0:
+    #def on_train_epoch_end(self, trainer, module):
+    def on_train_batch_end(self, trainer, module, outputs, batch, batch_idx):   
+        last_demo_step = -1
+        if (trainer.global_step - 1) % self.demo_every != 0 or last_demo_step == trainer.global_step:
+        #if trainer.current_epoch % self.demo_every != 0:
             return
         
-        #last_demo_step = trainer.global_step
+        last_demo_step = trainer.global_step
 
         demo_reals, _ = next(self.demo_dl)
 
@@ -266,14 +233,8 @@ class DemoCallback(pl.Callback):
         with torch.no_grad():
 
             latents = module.encoder_ema(encoder_input)
-
-            if self.quantized:
-
-                #Rearrange for Memcodes
-                latents = rearrange(latents, 'b d n -> b n d')
-
-                latents, _= module.quantizer_ema(latents)
-                latents = rearrange(latents, 'b n d -> b d n')
+            
+            latents = torch.tanh(latents)
 
             latent_mean = latents.mean(dim=-1)
 
@@ -311,6 +272,7 @@ class DemoCallback(pl.Callback):
 
             log_dict[f'embeddings_3dpca'] = pca_point_cloud(latents)
             log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(latents))
+            log_dict[f'avg_embeddings_spec'] = wandb.Image(tokens_spectrogram_image(repeat(latent_mean, 'b d -> b d n', n = 100)))
 
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
@@ -328,6 +290,13 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
+
+    model_config = json.load(open(args.model_config))
+
+    args.sample_size = model_config["input_size"]
+
+    print(args.sample_size)
+
     train_set = SampleDataset([args.training_dir], args)
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
@@ -336,8 +305,8 @@ def main():
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(demo_dl, args)
-    diffusion_model = DiffusionDVAE(args)
+    demo_callback = DemoCallback(demo_dl, args, model_config)
+    diffusion_model = DiffusionDVAE(model_config)
     wandb_logger.watch(diffusion_model)
     push_wandb_config(wandb_logger, args)
 

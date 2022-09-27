@@ -5,6 +5,9 @@ import torch.nn as nn
 import torch.nn.utils.weight_norm as wn
 
 import cached_conv as cc
+from functools import partial
+from torch.nn import functional as F
+from blocks.blocks import SkipBlock, SelfAttention1d, ResConvBlock, Downsample1d, Upsample1d, Downsample1d_2, Upsample1d_2
 
 def mod_sigmoid(x):
     return 2 * torch.sigmoid(x)**2.3 + 1e-7
@@ -272,7 +275,6 @@ class AudioResnet(nn.Module):
                  in_channels=16,
                  out_channels=16,
                  width=64,
-                 
                  layers = 16,
                  loud_stride=1,
                  padding_mode="centered",
@@ -348,3 +350,81 @@ class AudioResnet(nn.Module):
 
         
         return waveform
+
+
+class AttnUnet1D(nn.Module):
+    def __init__(
+        self, 
+        io_channels = 2, 
+        depth=14,
+        n_attn_layers = 6,
+        c_mults = [128, 128, 256, 256] + [512] * 10,
+        cond_dim = 0,
+        kernel_size = 5,
+        learned_resample = False,
+        strides = [2] * 14
+    ):
+        super().__init__()
+
+        attn_layer = depth - n_attn_layers - 1
+
+        block = nn.Identity()
+
+        conv_block = partial(ResConvBlock, kernel_size=kernel_size)
+
+        for i in range(depth, 0, -1):
+            c = c_mults[i - 1]
+            stride = strides[i-1]
+            if i > 1:
+                c_prev = c_mults[i - 2]
+                add_attn = i >= attn_layer and n_attn_layers > 0
+                block = SkipBlock(
+                    Downsample1d_2(c_prev, c_prev, stride) if learned_resample else Downsample1d("cubic"),
+                    conv_block(c_prev, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if add_attn else nn.Identity(),
+                    conv_block(c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if add_attn else nn.Identity(),
+                    conv_block(c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if add_attn else nn.Identity(),
+                    block,
+                    conv_block(c * 2 if i != depth else c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if add_attn else nn.Identity(),
+                    conv_block(c, c, c),
+                    SelfAttention1d(
+                        c, c // 32) if add_attn else nn.Identity(),
+                    conv_block(c, c, c_prev),
+                    SelfAttention1d(c_prev, c_prev //
+                                    32) if add_attn else nn.Identity(),
+                    Upsample1d_2(c_prev, c_prev, stride) if learned_resample else Upsample1d(kernel="cubic")
+                )
+            else:
+                block = nn.Sequential(
+                    conv_block(io_channels + cond_dim, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, c),
+                    block,
+                    conv_block(c * 2, c, c),
+                    conv_block(c, c, c),
+                    conv_block(c, c, io_channels, is_last=True),
+                )
+        self.net = block
+
+        with torch.no_grad():
+            for param in self.net.parameters():
+                param *= 0.5
+
+    def forward(self, x, cond=None):
+        
+        inputs = [x]
+
+        if cond is not None:
+            cond = F.interpolate(cond, (x.shape[2], ), mode='linear', align_corners=False)
+            inputs.append(cond)
+
+        outputs = self.net(torch.cat(inputs, dim=1))
+
+        return outputs
