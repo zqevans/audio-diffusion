@@ -19,13 +19,15 @@ from einops import rearrange
 from diffusion.pqmf import CachedPQMF as PQMF
 import torchaudio
 
+from ema_pytorch import EMA
+
 import auraloss
 
 import wandb
 
 from aeiou.datasets import AudioDataset
 
-from audio_diffusion_pytorch import AudioDiffusionModel
+from audio_diffusion_pytorch import AudioDiffusionModel, LogNormalDistribution, Distribution
 from diffusion.model import ema_update
 from aeiou.viz import audio_spectrogram_image
 
@@ -34,30 +36,44 @@ class DiffusionUncond(pl.LightningModule):
         super().__init__()
 
         self.diffusion = AudioDiffusionModel(
-            in_channels = 2, 
-            channels = 256,
-            patch_blocks = 1,
-            patch_factor = 32,
-            resnet_groups = 8,
-            kernel_multiplier_downsample = 2,
-            multipliers = [1, 2, 4, 4, 4, 4, 4],
-            factors = [4, 4, 4, 2, 2, 2],
-            num_blocks = [2, 2, 2, 2, 2, 2],
-            attentions = [0, 0, 0, 1, 1, 1, 1],
-            attention_heads = 8,
-            attention_features = 128,
-            attention_multiplier = 2,
-            diffusion_sigma_data = 0.5
+            in_channels=2,
+            channels=256,
+            patch_blocks=1,
+            patch_factor=1,
+            multipliers=[4, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3],
+            factors=[1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2],
+            num_blocks=[1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4],
+            attentions=[0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2],
+            attention_heads=8,
+            attention_features=64,
+            attention_multiplier=2,
+            attention_use_rel_pos=False,
+            resnet_groups=8,
+            kernel_multiplier_downsample=2,
+            use_nearest_upsample=False,
+            use_skip_scale=True,
+            use_context_time=True,
+            use_magnitude_channels=False,
+            use_stft=True,
+            stft_num_fft=1023,
+            stft_hop_length=256,
+            diffusion_type="v",
+            diffusion_sigma_distribution=UniformDistribution(),
         )
 
-        self.diffusion_ema = deepcopy(self.diffusion)
-        self.ema_decay = global_args.ema_decay
+        self.diffusion_ema = EMA(
+            self.diffusion, 
+            beta=0.9999,
+            power=3/4,
+            update_after_step=100,
+            update_every=1
+        )
         
     def configure_optimizers(self):
         return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
   
     def training_step(self, batch, batch_idx):
-        reals = batch[0]
+        reals = batch
         
         batch_stdev = torch.std(batch.detach())
 
@@ -73,8 +89,7 @@ class DiffusionUncond(pl.LightningModule):
         return loss
 
     def on_before_zero_grad(self, *args, **kwargs):
-        decay = 0.95 if self.current_epoch < 25 else self.ema_decay
-        ema_update(self.diffusion, self.diffusion_ema, decay)
+        self.diffusion_ema.update()
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
@@ -89,7 +104,6 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_steps = global_args.demo_steps
         self.sample_rate = global_args.sample_rate
-        
 
     @rank_zero_only
     @torch.no_grad()
@@ -102,11 +116,15 @@ class DemoCallback(pl.Callback):
         
         last_demo_step = trainer.global_step
         
-        noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
-
         try:
-            fakes = module.diffusion_ema.sample(noise=noise, num_steps=self.demo_steps)
+            print("Creating noise")
+            noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
 
+            print("Starting sampling")
+            
+            fakes = module.diffusion_ema.ema_model.sample(noise=noise, num_steps=self.demo_steps)
+
+            print("Rearranging demos")
             # Put the demos together
             fakes = rearrange(fakes, 'b d n -> d (b n)')
 
@@ -119,7 +137,7 @@ class DemoCallback(pl.Callback):
 
             log_dict[f'demo'] = wandb.Audio(filename,
                                                 sample_rate=self.sample_rate,
-                                                caption=f'Reconstructed')
+                                                caption=f'Demos')
         
 
             log_dict[f'demo_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
@@ -127,13 +145,14 @@ class DemoCallback(pl.Callback):
 
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
         except Exception as e:
-            print(f'{type(e).__name__}: {e}', file=sys.stderr)
+            print(f'{type(e).__name__}: {e}')
 
 def main():
 
     args = get_all_args()
 
     args.latent_dim = 0
+    #args.random_crop = False
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
@@ -161,7 +180,7 @@ def main():
         devices=args.num_gpus,
         accelerator="gpu",
         num_nodes = args.num_nodes,
-        strategy='ddp',
+        strategy='ddp_find_unused_parameters_false',
         precision=16,
         accumulate_grad_batches=args.accum_batches, 
         callbacks=[ckpt_callback, demo_callback, exc_callback],

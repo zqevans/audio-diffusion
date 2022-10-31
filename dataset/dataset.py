@@ -39,19 +39,58 @@ def fast_scandir(
         files.extend(f)
     return subfolders, files
 
+def keyword_scandir(
+    dir:str,  # top-level directory at which to begin scanning
+    ext:list,  # list of allowed file extensions
+    keywords:list,  # list of keywords to search for in the file name
+    ):
+    "very fast `glob` alternative. from https://stackoverflow.com/a/59803793/4259243"
+    subfolders, files = [], []
+    keywords = [keyword.lower() for keyword in keywords]  # make keywords case insensitive
+    ext = ['.'+x if x[0]!='.' else x for x in ext]  # add starting period to extensions if needed
+    banned_words = ["paxheader", "__macosx"]
+    try: # hope to avoid 'permission denied' by this try
+        for f in os.scandir(dir):
+            try: # 'hope to avoid too many levels of symbolic links' error
+                if f.is_dir():
+                    subfolders.append(f.path)
+                elif f.is_file():
+                    is_hidden = f.name.split("/")[-1][0] == '.'
+                    has_ext = os.path.splitext(f.name)[1].lower() in ext
+                    name_lower = f.name.lower()
+                    has_keyword = any([keyword in name_lower for keyword in keywords])
+                    has_banned = any([banned_word in name_lower for banned_word in banned_words])
+                    if has_ext and has_keyword and not has_banned and not is_hidden:
+                        files.append(f.path)
+            except:
+                pass 
+    except:
+        pass
+
+    for dir in list(subfolders):
+        sf, f = keyword_scandir(dir, ext, keywords)
+        subfolders.extend(sf)
+        files.extend(f)
+    return subfolders, files
+
 def get_audio_filenames(
-    paths:list   # directories in which to search
+    paths:list,  # directories in which to search
+    keywords = None
     ):
     "recursively get a list of audio filenames"
     filenames = []
     if type(paths) is str: paths = [paths]
     for path in paths:               # get a list of relevant filenames
-        subfolders, files = fast_scandir(path, ['.wav','.flac','.ogg','.aiff','.aif','.mp3'])
+        exts = ['.wav','.flac','.ogg','.aiff','.aif','.mp3']
+        if keywords is not None:
+          subfolders, files = keyword_scandir(path, exts, keywords)
+        else:
+          subfolders, files = fast_scandir(path, exts)
         filenames.extend(files)
     return filenames
 
 class SampleDataset(torch.utils.data.Dataset):
-  def __init__(self, paths, global_args):
+  def __init__(self, paths, global_args, keywords = None):
     super().__init__()
     self.filenames = []
     print(f"Random crop: {global_args.random_crop}")
@@ -74,7 +113,7 @@ class SampleDataset(torch.utils.data.Dataset):
     #   for ext in ['wav','flac','ogg','aiff','aif','mp3']:
     #     self.filenames += fast_scandir(path, ext) #glob(f'{path}/**/*.{ext}', recursive=True)
 
-    self.filenames = get_audio_filenames(paths)
+    self.filenames = get_audio_filenames(paths, keywords)
 
     print(f'Found {len(self.filenames)} files')
 
@@ -90,7 +129,8 @@ class SampleDataset(torch.utils.data.Dataset):
     if self.cache_training_data: self.preload_files()
 
   def load_file(self, filename):
-    audio, sr = torchaudio.load(filename)
+    ext = filename.split(".")[-1]
+    audio, sr = torchaudio.load(filename, format=ext)
     if sr != self.sr:
       resample_tf = T.Resample(sr, self.sr)
       audio = resample_tf(audio)
@@ -131,6 +171,9 @@ class SampleDataset(torch.utils.data.Dataset):
         audio = self.audio_files[idx] # .copy()
       else:
         audio = self.load_file(audio_filename)
+
+      # if audio.shape[-1] > 60 * self.sr * 1:
+      #   print(f"Long file ({audio.shape[-1] / self.sr} seconds): {audio_filename} ")
 
       #Run augmentations on this sample (including random crop)
       if self.augs is not None:

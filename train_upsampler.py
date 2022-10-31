@@ -53,7 +53,7 @@ def sample(model, x, steps, eta, cond):
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
 
-    t = get_crash_schedule(t)
+    #t = get_crash_schedule(t)
     
     alphas, sigmas = get_alphas_sigmas(t)
 

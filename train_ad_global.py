@@ -15,7 +15,7 @@ from tqdm import trange
 import pytorch_lightning as pl
 import numpy as np
 from pytorch_lightning.utilities.distributed import rank_zero_only
-from einops import rearrange
+from einops import rearrange, repeat
 
 import torchaudio
 
@@ -24,7 +24,7 @@ import wandb
 from dataset.dataset import SampleDataset
 from diffusion.pqmf import CachedPQMF as PQMF
 from audio_diffusion_pytorch import UNet1d
-from autoencoders.soundstream import SoundStreamXLEncoder
+from encoders.encoders import AudioPerceiverEncoder, GlobalEncoder
 
 from quantizer_pytorch import Quantizer1d
 
@@ -48,15 +48,18 @@ def alpha_sigma_to_t(alpha, sigma):
     the noise."""
     return torch.atan2(sigma, alpha) / math.pi * 2
 
+def l2norm(t):
+    return F.normalize(t, p = 2, dim = -1)
+
 @torch.no_grad()
-def sample(model, x, steps, eta, context):
+def sample(model, x, steps, eta, features):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
 
-    t = get_crash_schedule(t)
+    #t = get_crash_schedule(t)
     
     alphas, sigmas = get_alphas_sigmas(t)
 
@@ -65,7 +68,7 @@ def sample(model, x, steps, eta, context):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i], context=context).float()
+            v = model(x, ts * t[i], features=features).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -102,43 +105,29 @@ class DiffusionDVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
-        capacity = 32
-
-        c_mults = [2, 4, 8, 16, 32, 32, 32]
-        
-        strides = [2, 2, 2, 2, 2, 2, 2]
-
-        self.encoder_ratio = np.prod(strides)
-
-        self.encoder = SoundStreamXLEncoder(
-            in_channels=2*global_args.pqmf_bands, 
-            capacity=capacity, 
-            latent_dim=global_args.latent_dim,
-            c_mults = c_mults,
-            strides = strides
-        )
+        #AudioPerceiverEncoder(in_channels = 2*global_args.pqmf_bands, out_features=global_args.global_latent_dim, depth=12)
+        self.encoder = GlobalEncoder(global_args.global_latent_dim, 2*self.pqmf_bands)
         self.encoder_ema = deepcopy(self.encoder)
-
-        self.factors = [4, 4, 4, 2, 2, 2]
 
         self.diffusion = UNet1d(
             in_channels = 2, 
             channels = 128,
-            patch_size = 1,
+            patch_blocks = 1,
+            patch_factor = 1,
             resnet_groups = 8,
             kernel_multiplier_downsample = 2,
-            kernel_sizes_init = [1, 3, 7],
-            multipliers = [1, 2, 4, 4, 4, 4, 4],
-            factors = self.factors,
-            num_blocks = [2, 2, 2, 2, 2, 2],
-            attentions = [False, False, False, True, True, True],
+            multipliers = [1, 1, 2, 2] + [4] *10,
+            factors = [2] *13,
+            num_blocks = [3]*13,
+            attentions = [0]*9 + [3]*4,
             attention_heads = 8,
-            attention_features = 128,
-            attention_multiplier = 4,
+            attention_features = 64,
+            attention_multiplier = 2,
+            context_features = global_args.global_latent_dim,
             use_nearest_upsample = False,
             use_skip_scale = True,
-            use_attention_bottleneck = True,
-            context_channels = [global_args.latent_dim] * (len(self.factors) + 1)
+            use_context_time = True,
+            use_magnitude_channels = False
         )
 
         self.diffusion_ema = deepcopy(self.diffusion)
@@ -148,7 +137,7 @@ class DiffusionDVAE(pl.LightningModule):
         self.num_quantizers = global_args.num_quantizers
         if self.num_quantizers > 0:
             self.quantizer = Quantizer1d(
-                channels = global_args.latent_dim,
+                channels = global_args.global_latent_dim,
                 num_groups = 1,
                 codebook_size = global_args.codebook_size,
                 num_residuals = self.num_quantizers,
@@ -159,14 +148,14 @@ class DiffusionDVAE(pl.LightningModule):
     def configure_optimizers(self):
         return optim.Adam([*self.encoder.parameters(), *self.diffusion.parameters()], lr=4e-5)
 
-    def get_context(self, latents):
-        upsample_factor = self.encoder_ratio
-        contexts = []
-        for factor in [1, *self.factors]:
-            upsample_factor /= factor
-            contexts.append(F.interpolate(latents, (int(latents.shape[2] * upsample_factor), ), mode='linear', align_corners=False))
+    # def get_context(self, latents):
+    #     upsample_factor = self.encoder_ratio
+    #     contexts = []
+    #     for factor in [1, *self.factors]:
+    #         upsample_factor /= factor
+    #         contexts.append(F.interpolate(latents, (int(latents.shape[2] * upsample_factor), ), mode='linear', align_corners=False))
 
-        return contexts
+    #     return contexts
 
     def training_step(self, batch, batch_idx):
         
@@ -180,7 +169,7 @@ class DiffusionDVAE(pl.LightningModule):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
-        t = get_crash_schedule(t)
+        #t = get_crash_schedule(t)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
@@ -194,15 +183,15 @@ class DiffusionDVAE(pl.LightningModule):
 
         # Compute the model output and the loss.
         with torch.cuda.amp.autocast():
-            tokens = self.encoder(encoder_input).float()
+            global_latent = self.encoder(encoder_input).float()
 
-            tokens = torch.tanh(tokens)
+            global_latent = l2norm(global_latent)
 
         if self.num_quantizers > 0:
-            tokens, quantizer_info = self.quantizer(tokens)
+            global_latent, quantizer_info = self.quantizer(global_latent)
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_reals, t, context=self.get_context(tokens))
+            v = self.diffusion(noised_reals, t, features=global_latent)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
             if self.num_quantizers > 0:
@@ -280,14 +269,14 @@ class DemoCallback(pl.Callback):
 
         with torch.no_grad():
 
-            tokens = module.encoder_ema(encoder_input)
+            global_latent = module.encoder_ema(encoder_input)
 
-            tokens = torch.tanh(tokens)
+            global_latent = l2norm(global_latent)
 
             if self.quantized:
-                tokens, quantizer_info = module.quantizer(tokens)
+                global_latent, quantizer_info = module.quantizer(global_latent)
 
-            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 0, module.get_context(tokens))
+            fakes = sample(module.diffusion_ema, noise, self.demo_steps, 1, global_latent)
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -314,10 +303,7 @@ class DemoCallback(pl.Callback):
                                                 sample_rate=self.sample_rate,
                                                 caption=f'Real')
 
-            log_dict[f'embeddings'] = embeddings_table(tokens)
-
-            log_dict[f'embeddings_3dpca'] = pca_point_cloud(tokens)
-            log_dict[f'embeddings_spec'] = wandb.Image(tokens_spectrogram_image(tokens))
+            log_dict[f'global_embeddings_spec'] = wandb.Image(tokens_spectrogram_image(repeat(global_latent, 'b d -> b d n', n = 100)))
 
             log_dict[f'real_melspec_left'] = wandb.Image(audio_spectrogram_image(demo_reals))
             log_dict[f'recon_melspec_left'] = wandb.Image(audio_spectrogram_image(fakes))
@@ -331,11 +317,13 @@ def main():
 
     args = get_all_args()
 
+    args.random_crop = False
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SampleDataset([args.training_dir], args)
+    train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)

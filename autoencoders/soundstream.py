@@ -44,7 +44,7 @@ class ResidualUnit(nn.Module):
             CausalConv1d(in_channels=in_channels, out_channels=out_channels,
                       kernel_size=7, dilation=dilation),
             nn.ELU(),
-            nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+            nn.Conv1d(in_channels=out_channels, out_channels=out_channels,
                       kernel_size=1)
         )
 

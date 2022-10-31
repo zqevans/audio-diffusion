@@ -19,15 +19,11 @@ import torchaudio
 
 import auraloss
 
-from losses.freq_losses import PerceptualSumAndDifferenceSTFTLoss
-
 import wandb
-
-from diffusion.pqmf import CachedPQMF as PQMF
 
 from aeiou.datasets import AudioDataset
 
-from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
+from audio_encoders_pytorch import AutoEncoder1d
 
 from diffusion.utils import PadCrop, Stereo
 
@@ -40,40 +36,12 @@ class AudioAutoencoder(pl.LightningModule):
     def __init__(self, global_args):
         super().__init__()
 
-        self.pqmf_bands = global_args.pqmf_bands
-
-        if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
-
-        capacity = 32
-
-        c_mults = [2, 4, 8, 16, 32]
-        
-        strides = [2, 2, 2, 2, 2]
-
-        self.encoder = SoundStreamXLEncoder(
-            in_channels=2*global_args.pqmf_bands, 
-            capacity=capacity, 
-            latent_dim=global_args.latent_dim,
-            c_mults = c_mults,
-            strides = strides
-        )
-
-       # self.encoder_ema = deepcopy(self.encoder)
-        self.decoder = SoundStreamXLDecoder(
-            out_channels=2*global_args.pqmf_bands, 
-            capacity=capacity, 
-            latent_dim=global_args.latent_dim,
-            c_mults = c_mults,
-            strides = strides
-        )
-
         self.quantizer = None
 
         self.num_residuals = global_args.num_residuals
         if self.num_residuals > 0:
             self.quantizer = Quantizer1d(
-                channels = global_args.latent_dim,
+                channels = 32,
                 num_groups = 1,
                 codebook_size = global_args.codebook_size,
                 num_residuals = self.num_residuals,
@@ -81,7 +49,17 @@ class AudioAutoencoder(pl.LightningModule):
                 expire_threshold=0.5
             )
 
-      #  self.decoder_ema = deepcopy(self.diffusion)
+        self.autoencoder = AutoEncoder1d(
+            in_channels = 2, 
+            channels = 64,
+            patch_factor = 4,
+            patch_blocks = 1,
+            resnet_groups = 8,
+            multipliers = [1, 2, 4, 4, 4, 1],
+            factors = [2, 2, 2, 2, 1],
+            num_blocks = [8, 8, 8, 8, 8]
+        )
+
         self.ema_decay = global_args.ema_decay
         
         scales = [2048, 1024, 512, 256, 128]
@@ -94,58 +72,46 @@ class AudioAutoencoder(pl.LightningModule):
 
         self.sdstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
 
+    def configure_optimizers(self):
+        return optim.Adam([*self.autoencoder.parameters()], lr=1e-4)
+  
     def encode(self, audio, with_info = False):
-        latents = torch.tanh(self.encoder(audio))
+        latents = torch.tanh(self.autoencoder.encode(audio))
 
         if self.quantizer:
-            latents, _ = self.quantizer(latents)
+            latents, info = self.quantizer(latents)
+
+            if with_info:
+                return (latents, info)
 
         return latents
 
     def decode(self, latents):
-        return self.decoder(latents)
+        return self.autoencoder.decode(latents)
 
-    def configure_optimizers(self):
-        return optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=4e-5)
-  
     def training_step(self, batch):
         reals = batch
+          
+        latents = torch.tanh(self.autoencoder.encode(reals).float())            
 
-        encoder_input = reals
+        if self.quantizer:
+            latents, quantizer_info = self.quantizer(latents, num_residuals = random.randint(1, self.num_residuals))
+            quantizer_loss = quantizer_info["loss"]
 
-        if self.pqmf_bands > 1:
-            encoder_input = self.pqmf(reals)
+        decoded = self.decode(latents)
 
-        # Compute the model output and the loss.
-        with torch.cuda.amp.autocast():
-            # Freeze the encoder
-            latents = torch.tanh(self.encoder(encoder_input).float())            
+        mrstft_loss = self.sdstft(reals, decoded)
 
-            if self.quantizer:
-                latents, quantizer_info = self.quantizer(latents, num_residuals = random.randint(1, self.num_residuals))
-                quantizer_loss = quantizer_info["loss"]
+        loss = mrstft_loss
 
-            decoded = self.decoder(latents)
-
-            #Add pre-PQMF loss
-            mb_distance = torch.tensor(0., device=self.device)
-
-            if self.pqmf_bands > 1:
-                mb_distance = F.mse_loss(encoder_input, decoded)
-                decoded = self.pqmf.inverse(decoded)
-
-            mrstft_loss = self.sdstft(reals, decoded)
-            loss = mrstft_loss + mb_distance
-
-            if self.quantizer:
-                loss += quantizer_loss
+        if self.quantizer:
+            loss += quantizer_loss
 
         log_dict = {
             'train/loss': loss.detach(),
-            'train/mb_distance': mb_distance.detach(),
-            'train/mrstft_loss': mrstft_loss.detach(),
+            'train/mrstft_loss': mrstft_loss.detach(),            
         }
-
+  
         if self.quantizer:
             log_dict["train/quantizer_loss"] = quantizer_loss.detach()
 
@@ -162,16 +128,6 @@ class AudioAutoencoder(pl.LightningModule):
         self.log_dict(log_dict, prog_bar=True, on_step=True)
         return loss
 
-    def load_encoder_weights_from_diffae(self, diffae_state_dict):
-        own_state = self.state_dict()
-        for name, param in diffae_state_dict.items():
-            if name.startswith("encoder_ema."):
-                new_name = name.replace("encoder_ema.", "encoder.")
-                if isinstance(param, Parameter):
-                    # backwards compatibility for serialized parameters
-                    param = param.data
-                own_state[new_name].copy_(param)
-
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
         print(f'{type(err).__name__}: {err}', file=sys.stderr)
@@ -184,10 +140,6 @@ class DemoCallback(pl.Callback):
         self.demo_samples = global_args.sample_size
         self.demo_dl = iter(demo_dl)
         self.sample_rate = global_args.sample_rate
-        self.pqmf_bands = global_args.pqmf_bands
-
-        if self.pqmf_bands > 1:
-            self.pqmf = PQMF(2, 70, global_args.pqmf_bands)
 
     @rank_zero_only
     @torch.no_grad()
@@ -204,9 +156,6 @@ class DemoCallback(pl.Callback):
 
         encoder_input = demo_reals
         
-        if self.pqmf_bands > 1:
-            encoder_input = self.pqmf(demo_reals)
-        
         encoder_input = encoder_input.to(module.device)
 
         demo_reals = demo_reals.to(module.device)
@@ -214,10 +163,6 @@ class DemoCallback(pl.Callback):
         with torch.no_grad():
             tokens = module.encode(encoder_input)
             fakes = module.decode(tokens)
-
-            if self.pqmf_bands > 1:
-                fakes = self.pqmf.inverse(fakes.cpu())
-
 
         # Put the demos together
         fakes = rearrange(fakes, 'b d n -> d (b n)')
@@ -282,16 +227,7 @@ def main():
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
     demo_callback = DemoCallback(demo_dl, args)
 
-    if args.ckpt_path:
-        model = AudioAutoencoder.load_from_checkpoint(args.ckpt_path, global_args=args)
-    else:
-        model = AudioAutoencoder(args)
-
-    if args.encoder_diffae_ckpt != '':
-        diffae_state_dict = torch.load(args.encoder_diffae_ckpt, map_location='cpu')['state_dict']
-        model.load_encoder_weights_from_diffae(diffae_state_dict)
-        
-    #model.encoder.requires_grad_(False)
+    model = AudioAutoencoder(args)
 
     wandb_logger.watch(model)
     push_wandb_config(wandb_logger, args)
@@ -301,7 +237,7 @@ def main():
         accelerator="gpu",
         num_nodes=args.num_nodes,
         strategy='ddp_find_unused_parameters_false',
-        precision=16,
+        #precision=16,
         accumulate_grad_batches=args.accum_batches, 
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
@@ -309,7 +245,7 @@ def main():
         max_epochs=10000000,
     )
 
-    trainer.fit(model, train_dl)
+    trainer.fit(model, train_dl, ckpt_path=args.ckpt_path)
 
 if __name__ == '__main__':
     main()

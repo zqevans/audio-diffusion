@@ -101,29 +101,32 @@ class GlobalEncoder(nn.Sequential):
 
 class AudioPerceiverEncoder(nn.Module):
     def __init__(self, 
-        n_io_channels = 2, 
-        latent_dim = 256, 
+        in_channels = 2, 
+        out_features = 256, 
         depth=10, 
-        self_per_cross_attn=2
+        self_per_cross_attn=2,
+        weight_tie_layers = False,
+        internal_num_latents = 256,
+        internal_latent_dim = 512,
     ):
         super().__init__()
         self.net = Perceiver(
-            input_channels=n_io_channels,          # number of channels for each token of the input
+            input_channels=in_channels,          # number of channels for each token of the input
             input_axis=1,# number of axis for input data (1 for audio, 2 for images, 3 for video)            
             num_freq_bands=128,# number of freq bands, with original value (2 * K + 1)
             max_freq=1000.,  # maximum frequency, hyperparameter depending on how fine the data is
             depth=depth,# depth of net. The shape of the final attention mechanism will be:
                      # depth * (cross attention -> self_per_cross_attn * self attention)
-            num_latents=256,  # number of latents, or induced set points, or centroids. different papers giving it different names
-            latent_dim=512,            # latent dimension
+            num_latents=internal_num_latents,  # number of latents, or induced set points, or centroids. different papers giving it different names
+            latent_dim=internal_latent_dim, # latent dimension
             cross_heads=1,             # number of heads for cross attention. paper said 1
             latent_heads=8,            # number of heads for latent self attention, 8
             cross_dim_head=64,         # number of dimensions per cross attention head
             latent_dim_head=64,        # number of dimensions per latent self attention head
-            num_classes=latent_dim,          # output number of classes
+            num_classes=out_features,          # output number of classes
             attn_dropout=0.,
             ff_dropout=0.,
-            weight_tie_layers=False,# whether to weight tie layers (optional, as indicated in the diagram)
+            weight_tie_layers=weight_tie_layers,# whether to weight tie layers (optional, as indicated in the diagram)
             fourier_encode_data=True,  # whether to auto-fourier encode the data, using the input_axis given. defaults to True, but can be turned off if you are fourier encoding the data yourself
             self_per_cross_attn=self_per_cross_attn      # number of self attention blocks per cross attention
         )

@@ -3,7 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from blocks.blocks import Downsample1d, SelfAttention1d, DilatedConvBlock, Upsample1d
+from blocks.blocks import Downsample1d, SelfAttention1d, Upsample1d
+
+from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
 
 class AttnResEncoder1D(nn.Module):
     def __init__(
@@ -140,3 +142,42 @@ class AttnResDecoder1D(nn.Module):
 
     def forward(self, input):
         return self.act(self.net(input))
+
+
+class AudioAutoencoder(nn.Module):
+    def __init__(
+        self,
+        capacity = 64,
+        c_mults = [2, 4, 8, 16, 32],        
+        strides = [2, 2, 2, 2, 2],
+        latent_dim = 32,
+        in_channels = 2,
+        out_channels = 2
+    ):
+        super().__init__()
+
+        self.downsampling_ratio = np.prod(strides)
+
+        self.latent_dim = latent_dim
+
+        self.encoder = SoundStreamXLEncoder(
+            in_channels = in_channels, 
+            capacity = capacity, 
+            latent_dim = self.latent_dim,
+            c_mults = c_mults,
+            strides = strides
+        )
+
+        self.decoder = SoundStreamXLDecoder(
+            out_channels=2, 
+            capacity = capacity, 
+            latent_dim = self.latent_dim,
+            c_mults = c_mults,
+            strides = strides
+        )
+
+    def encode(self, audio, with_info = False):
+        return torch.tanh(self.encoder(audio))
+
+    def decode(self, latents):
+        return self.decoder(latents)

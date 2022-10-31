@@ -23,6 +23,8 @@ import auraloss
 
 import wandb
 
+from aeiou.datasets import AudioDataset
+
 from dataset.dataset import SampleDataset
 
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
@@ -54,7 +56,7 @@ def sample(model, x, steps, eta):
     # Create the noise schedule
     t = torch.linspace(1, 0, steps + 1)[:-1]
 
-    #t = get_crash_schedule(t)
+    t = get_crash_schedule(t)
 
     alphas, sigmas = get_alphas_sigmas(t)
 
@@ -97,9 +99,7 @@ class DiffusionUncond(pl.LightningModule):
         self.diffusion = DiffusionAttnUnet1D(
             io_channels=2, 
             pqmf_bands = global_args.pqmf_bands, 
-            depth=10,
             n_attn_layers=4,
-            c_mults=[256] + [512] * 9
         )
 
         self.diffusion_ema = deepcopy(self.diffusion)
@@ -110,12 +110,12 @@ class DiffusionUncond(pl.LightningModule):
         return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
   
     def training_step(self, batch, batch_idx):
-        reals = batch[0]
+        reals = batch
         
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
-        #t = get_crash_schedule(t)
+        t = get_crash_schedule(t)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
@@ -203,11 +203,22 @@ def main():
 
     args.latent_dim = 0
 
+    args.random_crop = False
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = SampleDataset([args.training_dir], args)
+    train_set = AudioDataset(
+        [args.training_dir],
+        sample_rate=args.sample_rate,
+        sample_size=args.sample_size,
+        random_crop=args.random_crop,
+        augs='Stereo(), PhaseFlipper()'
+    )
+    
+    #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
+
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
