@@ -234,7 +234,7 @@ class LatentAudioDiffusion(pl.LightningModule):
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
-        print(f'{type(err).__name__}: {err}', file=sys.stderr)
+        print(f'{type(err).__name__}: {err}')
 
 
 class DemoCallback(pl.Callback):
@@ -292,7 +292,7 @@ class DemoCallback(pl.Callback):
             trainer.logger.experiment.log(log_dict, step=trainer.global_step)
 
         except Exception as e:
-            print(f'{type(e).__name__}: {e}', file=sys.stderr)
+            print(f'{type(e).__name__}: {e}')
 
 def main():
 

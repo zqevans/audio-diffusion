@@ -290,17 +290,17 @@ def main():
 
     args.random_crop = False
 
-    train_set = AudioDataset(
-        [args.training_dir],
-        sample_rate=args.sample_rate,
-        sample_size=args.sample_size,
-        random_crop=args.random_crop,
-        augs='Stereo(), PhaseFlipper()'
-    )
+    # train_set = AudioDataset(
+    #     [args.training_dir],
+    #     sample_rate=args.sample_rate,
+    #     sample_size=args.sample_size,
+    #     random_crop=args.random_crop,
+    #     augs='Stereo(), PhaseFlipper()'
+    # )
 
     #args.random_crop = False
 
-    #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
+    train_set = SampleDataset([args.training_dir], args)
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)

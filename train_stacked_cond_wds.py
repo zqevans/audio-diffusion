@@ -26,14 +26,16 @@ from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
 from autoencoders.models import AudioAutoencoder
 from audio_encoders_pytorch import Encoder1d
 from ema_pytorch import EMA
-from audio_diffusion_pytorch import UNet1d
-
+from audio_diffusion_pytorch import UNetConditional1d
+from audio_diffusion_pytorch import T5Embedder
+from torchaudio import transforms as T
 
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
 from aeiou.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
-from aeiou.datasets import AudioDataset
-from dataset.dataset import SampleDataset
+from aeiou.datasets import HybridAudioDataset, get_all_s3_urls, PadCrop, Stereo, PhaseFlipper
+
+import webdataset as wds
 
 # Define the noise schedule and sampling loop
 def get_alphas_sigmas(t):
@@ -47,7 +49,7 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, cond = None):
+def sample(model, x, steps, eta, **extra_args):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
@@ -61,10 +63,7 @@ def sample(model, x, steps, eta, cond = None):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            if cond is not None:
-                v = model(x, ts * t[i], cond).float()
-            else:
-                v = model(x, ts * t[i]).float()
+            v = model(x, ts * t[i], **extra_args).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -144,31 +143,39 @@ class LatentAudioDiffusionAutoencoder(pl.LightningModule):
 
         return second_stage_latents
 
-    def decode(self, latents, steps=250, device="cuda"):
+    def decode(self, latents, steps=100, device="cuda"):
         first_stage_latent_noise = torch.randn([latents.shape[0], self.latent_dim, latents.shape[2]*self.latent_downsampling_ratio]).to(device)
 
-        first_stage_sampled = sample(self.diffusion, first_stage_latent_noise, steps, 0, latents)
+        first_stage_sampled = sample(self.diffusion, first_stage_latent_noise, steps, 0, cond=latents)
         decoded = self.autoencoder.decode(first_stage_sampled)
         return decoded
 
-class StackedAELatentDiffusion(pl.LightningModule):
+class StackedAELatentDiffusionCond(pl.LightningModule):
     def __init__(self, latent_ae: LatentAudioDiffusionAutoencoder):
         super().__init__()
 
         self.latent_dim = latent_ae.second_stage_latent_dim
         self.downsampling_ratio = latent_ae.downsampling_ratio
 
-        self.diffusion = UNet1d(
+        embedding_max_len = 64
+
+        self.embedder = T5Embedder(model='t5-base', max_length=embedding_max_len).requires_grad_(False)
+
+        self.embedding_features = 768
+
+        self.diffusion = UNetConditional1d(
             in_channels = self.latent_dim, 
+            context_embedding_features = self.embedding_features,
+            context_embedding_max_length= embedding_max_len,
             channels = 256,
             patch_blocks = 1,
             patch_factor = 1,
             resnet_groups = 8,
             kernel_multiplier_downsample = 2,
-            multipliers = [2, 2, 2, 2, 2, 2, 2, 2, 2],
-            factors = [2, 2, 2, 2, 2, 2, 2, 2],
-            num_blocks = [3, 3, 3, 3, 3, 3, 4, 4],
-            attentions = [0, 0, 0, 3, 3, 3, 3, 3, 3],
+            multipliers = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            factors = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            num_blocks = [3, 3, 3, 3, 3, 3, 4, 4, 4, 4],
+            attentions = [0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3],
             attention_heads = 16,
             attention_features = 64,
             attention_multiplier = 4,
@@ -178,6 +185,10 @@ class StackedAELatentDiffusion(pl.LightningModule):
             use_context_time = True,
             use_magnitude_channels = False
         )
+
+        # with torch.no_grad():
+        #     for param in self.diffusion.parameters():
+        #         param *= 0.5
 
         self.diffusion_ema = EMA(
             self.diffusion,
@@ -196,18 +207,23 @@ class StackedAELatentDiffusion(pl.LightningModule):
     def encode(self, reals):
         return self.autoencoder.encode(reals)
 
-    def decode(self, latents, steps=250):
+    def decode(self, latents, steps=100):
         return self.autoencoder.decode(latents, steps, device=self.device)
 
     def configure_optimizers(self):
         return optim.Adam([*self.diffusion.parameters()], lr=1e-4)
 
     def training_step(self, batch, batch_idx):
-        reals = batch
+        reals, json, condition_string = batch
+        reals = reals[0]
+        condition_string = [cond[0] for cond in condition_string]
+
+        #print(condition_string)
 
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 latents = self.encode(reals)
+                embeddings = self.embedder(condition_string)
 
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -223,7 +239,8 @@ class StackedAELatentDiffusion(pl.LightningModule):
         targets = noise * alphas - latents * sigmas
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_latents, t)
+            # 0.1 CFG dropout
+            v = self.diffusion(noised_latents, t, embedding=embeddings, embedding_mask_proba = 0.1)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -264,9 +281,20 @@ class DemoCallback(pl.Callback):
         
         print("Starting demo")
         try:
-            latent_noise = torch.randn([self.num_demos, module.latent_dim, self.demo_samples//module.downsampling_ratio]).to(module.device)
-            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0)
-            print("Decoding fakes")
+            latent_noise = torch.randn([8, module.latent_dim, self.demo_samples//module.downsampling_ratio]).to(module.device)
+
+            embedding = module.embedder([
+                "06 - Luuli - Fluux Incapacitator - 2012 [Experimental,Psycore]", 
+                "08 - Interconnekted - Oneness - 2012 [Full-On,Morning]", 
+                "09 - Goch - Cooking - 2011 [Darkpsy,Forest]",
+                "05 - Xenofish - Paradoxal Cycle - 2015 [Downtempo,Drum 'n Bass,Twilight]", 
+                "04 - Brainstalker - Self Defeating - 2016 [Hi-tech]", 
+                "04 - Flembaz - Orobas (Daäna Remix) - 2015 [Progressive,Techno]", 
+                "02 - Conexion Animas - Espiritus Silenciosos - 2010 [Darkpsy,Full-On,Twilight]", 
+                "08 - Sphingida - Alone In Aqua Endless - 2007 [Deep Trance,Downtempo]"])
+
+            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0, embedding=embedding, embedding_scale=5.0)
+            
             fakes = module.decode(fake_latents)
 
             # Put the demos together
@@ -297,6 +325,42 @@ class DemoCallback(pl.Callback):
         except Exception as e:
             print(f'{type(e).__name__}: {e}')
 
+def wds_preprocess(sample, sample_size=1048576, sample_rate=48000, verbose=False):
+    "utility routine for QuickWebDataLoader, below"
+    audio_keys = ("flac", "wav", "mp3", "aiff")
+    found_key, rewrite_key = '', ''
+    for k,v in sample.items():  # print the all entries in dict
+        for akey in audio_keys:
+            if k.endswith(akey): 
+                found_key, rewrite_key = k, akey  # to rename long/weird key with its simpler counterpart
+                break
+        if '' != found_key: break 
+    if '' == found_key:  # got no audio!   
+        print("  Error: No audio in this sample:")
+        for k,v in sample.items():  # print the all entries in dict
+            print(f"    {k:20s} {repr(v)[:50]}")
+        print("       Skipping it.")
+        return None  # try returning None to tell WebDataset to skip this one ?   
+    
+    audio, in_sr = sample[found_key]
+    if in_sr != sample_rate:
+        if verbose: print(f"Resampling {filename} from {in_sr} Hz to {sample_rate} Hz",flush=True)
+        resample_tf = T.Resample(in_sr, sample_rate)
+        audio = resample_tf(audio)        
+    myop = torch.nn.Sequential(PadCrop(sample_size), Stereo(), PhaseFlipper())
+    audio = myop(audio)
+    if found_key != rewrite_key:   # rename long/weird key with its simpler counterpart
+        del sample[found_key]
+    sample[rewrite_key] = audio   
+
+    metadata = sample["json"]
+
+    condition_string = f'{metadata["file"][:-5]} - {metadata["year"]} [{",".join(metadata["tags"])}]'
+
+    sample["cond"] = condition_string
+     
+    return sample
+
 def main():
 
     args = get_all_args()
@@ -305,22 +369,50 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    args.random_crop = False
+    #args.random_crop = False
 
-    train_set = AudioDataset(
-        [args.training_dir],
-        sample_rate=args.sample_rate,
-        sample_size=args.sample_size,
-        random_crop=args.random_crop,
-        augs='Stereo(), PhaseFlipper()'
-    )
+    # train_set = AudioDataset(
+    #     [args.training_dir],
+        # sample_rate=args.sample_rate,
+        # sample_size=args.sample_size,
+        # random_crop=args.random_crop,
+    #     augs='Stereo(), PhaseFlipper()'
+    # )
 
     #args.random_crop = False
 
-    #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
+#    train_set = SampleDataset([args.training_dir], args)
 
-    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+    # keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"]
+
+    urls = get_all_s3_urls(names=['ekto/1'], s3_url_prefix="s3://s-harmonai/datasets/", recursive=True) 
+
+    shuffle_vals=[10, 10]
+
+    # train_set = HybridAudioDataset(
+    #     local_paths=[],
+    #     webdataset_names=[],
+    #     sample_rate=args.sample_rate,
+    #     sample_size=args.sample_size,
+    #     random_crop=args.random_crop,
+    #     augs='Stereo(), PhaseFlipper()'
+    # )  
+
+    dataset = wds.DataPipeline(
+        wds.ResampledShards(urls), # Yields a single .tar URL
+        wds.tarfile_to_samples(), # Opens up a stream to the TAR file, yields files grouped by keys
+        #wds.shuffle(bufsize=100, initial=10), # Pulls from iterator until initial value
+        wds.decode(wds.torch_audio),
+        wds.map(wds_preprocess),
+        wds.shuffle(bufsize=100, initial=10), # Pulls from iterator until initial value
+        wds.to_tuple("flac", "json", "cond"),
+        wds.batched(args.batch_size)
+    ).with_epoch(5)
+
+    train_dl = wds.WebLoader(dataset, num_workers=args.num_workers)
+    #train_dl = data.DataLoader(train_set, args.batch_size, num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+
+                                 
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
@@ -340,7 +432,7 @@ def main():
     latent_diffae.latent_encoder = latent_diffae.latent_encoder_ema
     del latent_diffae.latent_encoder_ema
 
-    latent_diffusion_model = StackedAELatentDiffusion(latent_diffae)
+    latent_diffusion_model = StackedAELatentDiffusionCond(latent_diffae)
 
     wandb_logger.watch(latent_diffusion_model)
     push_wandb_config(wandb_logger, args)

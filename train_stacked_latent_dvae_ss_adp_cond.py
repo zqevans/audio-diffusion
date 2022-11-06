@@ -26,8 +26,7 @@ from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
 from autoencoders.models import AudioAutoencoder
 from audio_encoders_pytorch import Encoder1d
 from ema_pytorch import EMA
-from audio_diffusion_pytorch import UNet1d
-
+from audio_diffusion_pytorch import UNetConditional1d, T5Embedder
 
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
@@ -47,7 +46,7 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta, cond = None):
+def sample(model, x, steps, eta, **extra_args):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
@@ -61,10 +60,7 @@ def sample(model, x, steps, eta, cond = None):
 
         # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            if cond is not None:
-                v = model(x, ts * t[i], cond).float()
-            else:
-                v = model(x, ts * t[i]).float()
+            v = model(x, ts * t[i], **extra_args).float()
 
         # Predict the noise and the denoised image
         pred = x * alphas[i] - v * sigmas[i]
@@ -144,31 +140,39 @@ class LatentAudioDiffusionAutoencoder(pl.LightningModule):
 
         return second_stage_latents
 
-    def decode(self, latents, steps=250, device="cuda"):
+    def decode(self, latents, steps=100, device="cuda"):
         first_stage_latent_noise = torch.randn([latents.shape[0], self.latent_dim, latents.shape[2]*self.latent_downsampling_ratio]).to(device)
 
-        first_stage_sampled = sample(self.diffusion, first_stage_latent_noise, steps, 0, latents)
+        first_stage_sampled = sample(self.diffusion, first_stage_latent_noise, steps, 0, cond=latents)
         decoded = self.autoencoder.decode(first_stage_sampled)
         return decoded
 
-class StackedAELatentDiffusion(pl.LightningModule):
+class StackedAELatentDiffusionCond(pl.LightningModule):
     def __init__(self, latent_ae: LatentAudioDiffusionAutoencoder):
         super().__init__()
 
         self.latent_dim = latent_ae.second_stage_latent_dim
         self.downsampling_ratio = latent_ae.downsampling_ratio
 
-        self.diffusion = UNet1d(
+        embedding_max_len = 64
+
+        self.embedder = T5Embedder(model='t5-base', max_length=embedding_max_len).requires_grad_(False)
+
+        self.embedding_features = 768
+
+        self.diffusion = UNetConditional1d(
             in_channels = self.latent_dim, 
+            context_embedding_features = self.embedding_features,
+            context_embedding_max_length= embedding_max_len,
             channels = 256,
             patch_blocks = 1,
             patch_factor = 1,
             resnet_groups = 8,
             kernel_multiplier_downsample = 2,
-            multipliers = [2, 2, 2, 2, 2, 2, 2, 2, 2],
-            factors = [2, 2, 2, 2, 2, 2, 2, 2],
-            num_blocks = [3, 3, 3, 3, 3, 3, 4, 4],
-            attentions = [0, 0, 0, 3, 3, 3, 3, 3, 3],
+            multipliers = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            factors = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            num_blocks = [3, 3, 3, 3, 3, 3, 4, 4, 4, 4],
+            attentions = [0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3],
             attention_heads = 16,
             attention_features = 64,
             attention_multiplier = 4,
@@ -178,6 +182,10 @@ class StackedAELatentDiffusion(pl.LightningModule):
             use_context_time = True,
             use_magnitude_channels = False
         )
+
+        # with torch.no_grad():
+        #     for param in self.diffusion.parameters():
+        #         param *= 0.5
 
         self.diffusion_ema = EMA(
             self.diffusion,
@@ -196,18 +204,19 @@ class StackedAELatentDiffusion(pl.LightningModule):
     def encode(self, reals):
         return self.autoencoder.encode(reals)
 
-    def decode(self, latents, steps=250):
+    def decode(self, latents, steps=100):
         return self.autoencoder.decode(latents, steps, device=self.device)
 
     def configure_optimizers(self):
         return optim.Adam([*self.diffusion.parameters()], lr=1e-4)
 
     def training_step(self, batch, batch_idx):
-        reals = batch
+        reals, filenames = batch
 
         with torch.cuda.amp.autocast():
             with torch.no_grad():
                 latents = self.encode(reals)
+                embeddings = self.embedder(filenames)
 
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
@@ -223,7 +232,8 @@ class StackedAELatentDiffusion(pl.LightningModule):
         targets = noise * alphas - latents * sigmas
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_latents, t)
+            # 0.1 CFG dropout
+            v = self.diffusion(noised_latents, t, embedding=embeddings, embedding_mask_proba = 0.1)
             mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
@@ -264,9 +274,20 @@ class DemoCallback(pl.Callback):
         
         print("Starting demo")
         try:
-            latent_noise = torch.randn([self.num_demos, module.latent_dim, self.demo_samples//module.downsampling_ratio]).to(module.device)
-            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0)
-            print("Decoding fakes")
+            latent_noise = torch.randn([8, module.latent_dim, self.demo_samples//module.downsampling_ratio]).to(module.device)
+
+            embedding = module.embedder([
+                "02 - Virtual Riot - Power War--1.flac", 
+                "01. Kill The Noise - Gang Shit--2.flac", 
+                "03 - Porter Robinson - Bust It (feat. Virus Syndicate)--0.flac",
+                "04 - Seven Lions - Where We Are (feat. Dylan Matthew)--2.flac",
+                "01. SVDDEN DEATH - Exodus--1.flac",
+                "02. Mr. Bill - Crunch Time--1.flac",
+                "Slipknot - Let The Fire Burn--2.flac",
+                "02 - Gammer - Get Out The Way--2.flac"])
+
+            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0, embedding=embedding, embedding_scale=5.0)
+            
             fakes = module.decode(fake_latents)
 
             # Put the demos together
@@ -305,19 +326,21 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    args.random_crop = False
+    #args.random_crop = False
 
-    train_set = AudioDataset(
-        [args.training_dir],
-        sample_rate=args.sample_rate,
-        sample_size=args.sample_size,
-        random_crop=args.random_crop,
-        augs='Stereo(), PhaseFlipper()'
-    )
+    # train_set = AudioDataset(
+    #     [args.training_dir],
+    #     sample_rate=args.sample_rate,
+    #     sample_size=args.sample_size,
+    #     random_crop=args.random_crop,
+    #     augs='Stereo(), PhaseFlipper()'
+    # )
 
     #args.random_crop = False
 
-    #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
+    train_set = SampleDataset([args.training_dir], args, relpath=args.training_dir)
+
+    # keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"]
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
                                num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
@@ -340,7 +363,7 @@ def main():
     latent_diffae.latent_encoder = latent_diffae.latent_encoder_ema
     del latent_diffae.latent_encoder_ema
 
-    latent_diffusion_model = StackedAELatentDiffusion(latent_diffae)
+    latent_diffusion_model = StackedAELatentDiffusionCond(latent_diffae)
 
     wandb_logger.watch(latent_diffusion_model)
     push_wandb_config(wandb_logger, args)

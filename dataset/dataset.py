@@ -1,6 +1,6 @@
 import torch
 import torchaudio
-from os import makedirs
+from os import makedirs, path
 from torchaudio import transforms as T
 import random
 from glob import glob
@@ -90,9 +90,10 @@ def get_audio_filenames(
     return filenames
 
 class SampleDataset(torch.utils.data.Dataset):
-  def __init__(self, paths, global_args, keywords = None):
+  def __init__(self, paths, global_args, keywords = None, relpath=None):
     super().__init__()
     self.filenames = []
+    self.relpath = relpath
     print(f"Random crop: {global_args.random_crop}")
     self.augs = torch.nn.Sequential(
       PadCrop(global_args.sample_size, randomize=global_args.random_crop),
@@ -185,9 +186,12 @@ class SampleDataset(torch.utils.data.Dataset):
       if self.encoding is not None:
         audio = self.encoding(audio)
 
-      return (audio, audio_filename)
+      if self.relpath is not None:
+        audio_path = path.relpath(audio_filename, self.relpath)
+
+      return (audio, audio_path)
     except Exception as e:
-     # print(f'Couldn\'t load file {audio_filename}: {e}')
+      print(f'Couldn\'t load file {audio_filename}: {e}')
       return self[random.randrange(len(self))]
 
 # A dataset that will return spectrograms alongside the audio data
