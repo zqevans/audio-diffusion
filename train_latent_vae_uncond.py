@@ -33,6 +33,7 @@ from aeiou.datasets import AudioDataset
 from dataset.dataset import SampleDataset
 
 from losses.adv_losses import StackDiscriminators
+from dataset.dataset import get_wds_loader
 
 
 # Define the noise schedule and sampling loop
@@ -103,9 +104,9 @@ class AudioVAE(pl.LightningModule):
 
         capacity = 32
 
-        c_mults = [1, 2, 4, 4]
+        c_mults = [2, 4, 8, 16, 32]
         
-        strides = [2, 2, 2, 2]
+        strides = [2, 2, 2, 2, 2]
 
         global_args.latent_dim = 32
 
@@ -183,16 +184,16 @@ class AudioVAE(pl.LightningModule):
 class LatentAudioDiffusion(pl.LightningModule):
     def __init__(self, global_args, autoencoder: AudioVAE):
         super().__init__()
-
-        self.encoder = autoencoder.encoder
         
         self.latent_dim = autoencoder.latent_dim
         self.downsampling_ratio = autoencoder.downsampling_ratio
 
         self.diffusion = DiffusionAttnUnet1D(
             io_channels=self.latent_dim, 
-            n_attn_layers=4, 
-            c_mults=[256] * 2 + [512] * 8 + [1024] * 2,
+            n_attn_layers=2, 
+            c_mults=[512]*10,
+            #learned_resample = True,
+            #strides = [2,2,4,4],
             depth=10
         )
 
@@ -200,7 +201,7 @@ class LatentAudioDiffusion(pl.LightningModule):
 
         self.autoencoder = autoencoder
 
-        self.decoder = autoencoder.decoder
+       # self.decoder = autoencoder.decoder
         
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
         self.ema_decay = global_args.ema_decay
@@ -209,7 +210,7 @@ class LatentAudioDiffusion(pl.LightningModule):
 
     def encode(self, reals):
         # Just grab the means from the encoder
-        latents, _ = self.encoder(reals).chunk(2, dim=1)
+        latents = self.autoencoder.encode(reals)
 
         latents /= self.scale
 
@@ -225,12 +226,13 @@ class LatentAudioDiffusion(pl.LightningModule):
         return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
 
     def training_step(self, batch, batch_idx):
-        reals = batch
+        reals, _, _ = batch
+
+        reals = reals[0]
 
         # TODO: Re-add PQMF support
 
         with torch.cuda.amp.autocast():
-            # Only predict the means, not the sampled latents
             with torch.no_grad():
                 latents = self.encode(reals)
 
@@ -295,7 +297,7 @@ class DemoCallback(pl.Callback):
         print("Starting demo")
         try:
             latent_noise = torch.randn([self.num_demos, module.latent_dim, self.demo_samples//module.downsampling_ratio]).to(module.device)
-            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0)
+            fake_latents = sample(module.diffusion_ema, latent_noise, self.demo_steps, 0.9)
             noise = torch.randn([self.num_demos, 2, self.demo_samples]).to(module.device)
             print("Decoding fakes")
             fakes = module.decode(fake_latents)
@@ -337,20 +339,34 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    args.random_crop = False
+    #args.random_crop = False
 
-    train_set = AudioDataset(
-        [args.training_dir],
-        sample_rate=args.sample_rate,
-        sample_size=args.sample_size,
-        random_crop=args.random_crop,
-        augs='Stereo(), PhaseFlipper()'
-    )
+    # train_set = AudioDataset(
+    #     [args.training_dir],
+    #     sample_rate=args.sample_rate,
+    #     sample_size=args.sample_size,
+    #     random_crop=args.random_crop,
+    #     augs='Stereo(), PhaseFlipper()'
+    # )
 
     #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
 
-    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+    # train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
+    #                            num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+
+    names = []
+
+    train_dl = get_wds_loader(
+        batch_size=args.batch_size, 
+        s3_url_prefix=None, 
+        sample_size=args.sample_size, 
+        names=names, 
+        sample_rate=args.sample_rate, 
+        num_workers=args.num_workers, 
+        recursive=True,
+        random_crop=True
+    )
+
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     
     exc_callback = ExceptionCallback()
@@ -372,6 +388,7 @@ def main():
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=10000000,
+        default_root_dir=args.save_dir
     )
 
     diffusion_trainer.fit(latent_diffusion_model, train_dl, ckpt_path=args.ckpt_path)

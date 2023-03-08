@@ -22,10 +22,7 @@ import auraloss
 import wandb
 
 from aeiou.datasets import AudioDataset
-from audio_diffusion_pytorch import AutoEncoder1d
-
-from audio_diffusion_pytorch.modules import Bottleneck
-
+from dataset.dataset import get_wds_loader
 from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
 
 from diffusion.utils import PadCrop, Stereo
@@ -36,32 +33,6 @@ from quantizer_pytorch import Quantizer1d
 from aeiou.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
 from losses.adv_losses import StackDiscriminators
-
-class VAEBottleneck(Bottleneck):
-    # copied/modified from RAVE code
-    def __init__(self, channels):
-        super().__init__()
-        self.to_mean_scale = nn.Conv1d(
-            in_channels=channels,
-            out_channels=channels * 2,
-            kernel_size=1,
-        )
-
-    def sample(self, mean, scale):
-        stdev = nn.functional.softplus(scale) + 1e-4
-        var = stdev * stdev
-        logvar = torch.log(var)
-        latent = torch.randn_like(mean) * stdev + mean
-
-        kl = (mean * mean + var - logvar - 1).sum(1).mean()
-
-        return latent, kl
-
-    def forward(self, x):
-        #Map input channels to 2x and split them out
-        mean, scale = self.to_mean_scale(x).chunk(2, dim=1)
-
-        return self.sample(mean, scale)
         
 PQMF_ATTN = 100
 
@@ -82,12 +53,6 @@ class AudioVAE(pl.LightningModule):
         #         expire_threshold=0.5
         #     )
 
-        # capacity = 32
-
-        # c_mults = [2, 4, 8, 16, 32]
-        
-        # strides = [2, 2, 2, 2, 2]
-
         self.automatic_optimization = False
 
         self.pqmf_bands = global_args.pqmf_bands
@@ -95,11 +60,11 @@ class AudioVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, PQMF_ATTN, global_args.pqmf_bands)
 
-        capacity = 128
+        capacity = 32
 
-        c_mults = [1, 2, 4, 4]
+        c_mults = [2, 4, 8, 16, 32]
         
-        strides = [2, 2, 2, 2]
+        strides = [2, 2, 2, 2, 2]
 
         global_args.latent_dim = 32
 
@@ -124,7 +89,7 @@ class AudioVAE(pl.LightningModule):
         self.warmed_up = False
         self.warmup_steps = global_args.warmup_steps
         
-        scales = [2048, 1024, 512, 256, 128]
+        scales = [2048, 1024, 512]
         hop_sizes = []
         win_lengths = []
         overlap = 0.75
@@ -134,7 +99,7 @@ class AudioVAE(pl.LightningModule):
 
         self.mrstft = auraloss.freq.MultiResolutionSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
 
-        self.sdstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths)
+        self.sdstft = auraloss.freq.SumAndDifferenceSTFTLoss(fft_sizes=scales, hop_sizes=hop_sizes, win_lengths=win_lengths, sample_rate=global_args.sample_rate, perceptual_weighting=True, scale="mel", n_bins=64)
 
         self.discriminator = StackDiscriminators(
             3,
@@ -145,7 +110,7 @@ class AudioVAE(pl.LightningModule):
         )
 
     def configure_optimizers(self):
-        opt_gen = optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=1e-4)
+        opt_gen = optim.Adam([*self.encoder.parameters(), *self.decoder.parameters()], lr=4e-5)
         opt_disc = optim.Adam([*self.discriminator.parameters()], lr=1e-4, betas=(.5, .9))
         return [opt_gen, opt_disc]
   
@@ -187,7 +152,9 @@ class AudioVAE(pl.LightningModule):
                 own_state[name].copy_(param)
 
     def training_step(self, batch, batch_idx):
-        reals = batch
+        reals, _, _ = batch
+
+        reals = reals[0]
         
         if self.global_step >= self.warmup_steps:
             self.warmed_up = True
@@ -197,11 +164,12 @@ class AudioVAE(pl.LightningModule):
         if self.pqmf_bands > 1:
             reals = self.pqmf(reals)
 
-        if self.warmed_up:
-            with torch.no_grad():
-                mean, scale = self.encoder(reals).chunk(2, dim=1)
-        else:
-            mean, scale = self.encoder(reals).chunk(2, dim=1)
+        # if self.warmed_up:
+        #     with torch.no_grad():
+        #         mean, scale = self.encoder(reals).chunk(2, dim=1)
+        # else:
+        mean, scale = self.encoder(reals).chunk(2, dim=1)
+
         latents, kl = self.sample(mean, scale)
 
         decoded = self.decoder(latents)
@@ -246,7 +214,7 @@ class AudioVAE(pl.LightningModule):
             feature_matching_distance = 0.05 * feature_matching_distance
 
             # Combine spectral loss, KL loss, time-domain loss, and adversarial loss
-            loss = mrstft_loss + mb_distance + loss_adv + feature_matching_distance # + kl_loss + l1_time_loss 
+            loss = mrstft_loss + mb_distance + loss_adv + feature_matching_distance + kl_loss #+ l1_time_loss 
 
             opt_gen.zero_grad()
             self.manual_backward(loss)
@@ -308,7 +276,9 @@ class DemoCallback(pl.Callback):
         self.last_demo_step = trainer.global_step
 
         try:
-            demo_reals = next(self.demo_dl)
+            demo_reals, _, _ = next(self.demo_dl)
+
+            demo_reals = demo_reals[0]
 
             encoder_input = demo_reals
             
@@ -367,22 +337,25 @@ def main():
     print('Using device:', device)
     torch.manual_seed(args.seed)
 
-    train_set = AudioDataset(
-        [args.training_dir],
-        sample_rate=args.sample_rate,
+    names = []
+
+    train_dl = get_wds_loader(
+        batch_size=args.batch_size,
+        s3_url_prefix=None,
         sample_size=args.sample_size,
-        random_crop=args.random_crop,
-        augs='Stereo(), PhaseFlipper()'
+        names=names,
+        sample_rate=args.sample_rate,
+        num_workers=args.num_workers,
+        recursive=True,
+        random_crop=True,
+        epoch_steps=10000,
     )
 
-    train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
-    demo_dl = data.DataLoader(train_set, args.num_demos, num_workers=args.num_workers, shuffle=True)
     
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
-    demo_callback = DemoCallback(demo_dl, args)
+    demo_callback = DemoCallback(train_dl, args)
 
     model = AudioVAE(args)
 
@@ -400,12 +373,13 @@ def main():
         accelerator="gpu",
         num_nodes=args.num_nodes,
         strategy='ddp',
-        #precision=16,
+        precision=16,
         accumulate_grad_batches=args.accum_batches, 
         callbacks=[ckpt_callback, demo_callback, exc_callback],
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=10000000,
+        default_root_dir=args.save_dir
     )
 
     trainer.fit(model, train_dl, ckpt_path=args.ckpt_path)

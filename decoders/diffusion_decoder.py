@@ -5,7 +5,9 @@ from functools import partial
 from blocks.blocks import DBlock, MappingNet, SkipBlock, FourierFeatures, UBlock, UNet, expand_to_planes, SelfAttention1d, ResConvBlock,OutConvBlock, Downsample1d, Upsample1d, Downsample1d_2, Upsample1d_2
 from blocks.utils import append_dims
 from diffusion.pqmf import CachedPQMF as PQMF
-from einops.layers.torch import Rearrange
+from einops import rearrange
+
+from autoencoders.transformer_ae import ContinuousLocalTransformer
 
 class DiffusionResConvUnet(nn.Module):
     def __init__(self, latent_dim, io_channels, depth=16):
@@ -59,14 +61,21 @@ class DiffusionAttnUnet1D(nn.Module):
         n_attn_layers = 6,
         c_mults = [128, 128, 256, 256] + [512] * 10,
         cond_dim = 0,
+        cond_noise_aug = False,
         pqmf_bands = 1,
         kernel_size = 5,
         learned_resample = False,
-        strides = [2] * 14
+        strides = [2] * 14,
+        conv_bias = True
     ):
         super().__init__()
 
         self.pqmf_bands = pqmf_bands
+
+        self.cond_noise_aug = cond_noise_aug
+
+        if self.cond_noise_aug:
+            self.rng = torch.quasirandom.SobolEngine(1, scramble=True)
 
         if self.pqmf_bands > 1:
             self.pqmf = PQMF(2, 70, self.pqmf_bands)
@@ -77,7 +86,7 @@ class DiffusionAttnUnet1D(nn.Module):
 
         block = nn.Identity()
 
-        conv_block = partial(ResConvBlock, kernel_size=kernel_size)
+        conv_block = partial(ResConvBlock, kernel_size=kernel_size, conv_bias = conv_bias)
 
         for i in range(depth, 0, -1):
             c = c_mults[i - 1]
@@ -111,8 +120,9 @@ class DiffusionAttnUnet1D(nn.Module):
                     #             align_corners=False),
                 )
             else:
+                cond_embed_dim = 16 if not self.cond_noise_aug else 32
                 block = nn.Sequential(
-                    conv_block((io_channels * self.pqmf_bands + cond_dim) + 16, c, c),
+                    conv_block((io_channels * self.pqmf_bands + cond_dim) + cond_embed_dim, c, c),
                     conv_block(c, c, c),
                     conv_block(c, c, c),
                     block,
@@ -122,14 +132,11 @@ class DiffusionAttnUnet1D(nn.Module):
                 )
         self.net = block
 
-        if self.pqmf_bands > 1:
-            self.post_net = OutConvBlock(io_channels, io_channels * 4, io_channels, is_last=True)
-
         with torch.no_grad():
             for param in self.net.parameters():
                 param *= 0.5
 
-    def forward(self, x, t, cond=None):
+    def forward(self, x, t, cond=None, cond_aug_scale=None):
 
         if self.pqmf_bands > 1:
             x = self.pqmf(x)
@@ -139,16 +146,117 @@ class DiffusionAttnUnet1D(nn.Module):
         inputs = [x, timestep_embed]
 
         if cond is not None:
-            cond = F.interpolate(cond, (x.shape[2], ), mode='linear', align_corners=False)
+            if cond.shape[2] != x.shape[2]:
+                cond = F.interpolate(cond, (x.shape[2], ), mode='linear', align_corners=False)
+                
+            if self.cond_noise_aug:
+                # Get a random number between 0 and 1, uniformly sampled
+                if cond_aug_scale is None:
+                    aug_level = self.rng.draw(cond.shape[0])[:, 0].to(cond)  
+                else:
+                    aug_level = torch.tensor([cond_aug_scale]).repeat([cond.shape[0]]).to(cond)
+                    print(f"Using cond_aug_scale {aug_level}")
+             
+
+                # Add noise to the conditioning signal
+                cond = cond + torch.randn_like(cond) * aug_level[:, None, None]
+
+                # Get embedding for noise cond level, reusing timestamp_embed
+                aug_level_embed = expand_to_planes(self.timestep_embed(aug_level[:, None]), x.shape)
+
+                inputs.append(aug_level_embed)
+
             inputs.append(cond)
 
         outputs = self.net(torch.cat(inputs, dim=1))
 
         if self.pqmf_bands > 1:
             outputs = self.pqmf.inverse(outputs)
-            outputs = self.post_net(outputs)
 
         return outputs
+
+class TransformerDiffusionDecoder(nn.Module):
+    def __init__(self, 
+        io_channels=32, 
+        cond_dim=0,
+        embed_dim=768,
+        depth=12,
+        num_heads=8, 
+        local_attn_window_size=64):
+
+        super().__init__()
+        
+        # Timestep embeddings
+        timestep_features_dim = 16
+
+        self.timestep_features = FourierFeatures(1, timestep_features_dim)
+
+        # Transformer
+
+        self.transformer = ContinuousLocalTransformer(
+            dim_in = io_channels + cond_dim + timestep_features_dim,
+            dim_out = io_channels,
+            dim = embed_dim,
+            depth = depth,
+            heads = num_heads,     
+            local_attn_window_size = local_attn_window_size       
+        )
+
+    def forward(
+        self, 
+        x, 
+        t, 
+        cond=None,
+        #cfg_scale=1.0,
+        #cfg_dropout_prob=0.0
+        ):
+
+        # if cond_tokens is not None:
+
+        #     cond_tokens = self.to_cond_embed(cond_tokens)
+
+        #     # CFG dropout
+        #     if cfg_dropout_prob > 0.0:
+        #         null_embed = torch.zeros_like(cond_tokens, device=cond_tokens.device)
+        #         dropout_mask = torch.bernoulli(torch.full((cond_tokens.shape[0], 1, 1), cfg_dropout_prob, device=cond_tokens.device)).to(torch.bool)
+        #         cond_tokens = torch.where(dropout_mask, null_embed, cond_tokens)
+  
+        
+        timestep_embed = expand_to_planes(self.timestep_features(t[:, None]), x.shape)
+        
+        inputs = [x, timestep_embed]
+
+        if cond is not None:
+            cond = F.interpolate(cond, (x.shape[2], ), mode='linear', align_corners=False)
+            inputs.append(cond)
+
+        x = torch.cat(inputs, dim=1)
+
+        x = rearrange(x, "b c t -> b t c")
+
+        # if cond_tokens is not None and cfg_scale != 1.0:
+        #     # Classifier-free guidance
+        #     # Concatenate conditioned and unconditioned inputs on the batch dimension            
+        #     batch_inputs = torch.cat([x, x], dim=0)
+            
+        #     null_embed = torch.zeros_like(cond_tokens, device=cond_tokens.device)
+
+        #     batch_timestep = torch.cat([timestep_embed, timestep_embed], dim=0)
+        #     batch_cond = torch.cat([cond_tokens, null_embed], dim=0)
+        #     batch_masks = torch.cat([cond_token_mask, cond_token_mask], dim=0)
+            
+        #     output = self.transformer(batch_inputs, prepend_embeds=batch_timestep, context=batch_cond, context_mask=batch_masks)
+
+        #     cond_output, uncond_output = torch.chunk(output, 2, dim=0)
+        #     output = uncond_output + (cond_output - uncond_output) * cfg_scale
+            
+        # else:
+            
+        output = self.transformer(x)
+
+        output = rearrange(output, "b t c -> b c t")
+
+        return output
 
 class AudioDenoiserModel(nn.Module):
     def __init__(
@@ -192,9 +300,11 @@ class AudioDenoiserModel(nn.Module):
         timestep_embed = self.timestep_embed(append_dims(c_noise, 2))
         mapping_cond_embed = torch.zeros_like(timestep_embed) if mapping_cond is None else self.mapping_cond(mapping_cond)
         
+
         mapping_out = self.mapping(timestep_embed + mapping_cond_embed)
         cond = {'cond': mapping_out}
         if unet_cond is not None:
+            unet_cond = F.interpolate(unet_cond, (input.shape[2], ), mode='linear', align_corners=False)
             input = torch.cat([input, unet_cond], dim=1)
         input = self.proj_in(input)
         input = self.u_net(input, cond)

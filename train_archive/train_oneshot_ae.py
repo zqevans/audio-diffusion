@@ -337,14 +337,6 @@ def main():
     trainer.fit(model, train_dl, ckpt_path=args.ckpt_path)
 
 if __name__ == '__main__':
-    try:
-        main()
-    except RuntimeError as err:
-        import requests
-        import datetime
-        ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id')
-        print(f'ERROR at {ts} on {resp.text}: {type(err).__name__}: {err}', flush=True)
-        raise err
+    main()
 
 

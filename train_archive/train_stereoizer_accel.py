@@ -248,54 +248,45 @@ def main():
             'step': step
         }
         accelerator.save(obj, filename)
-    try:
-        while True:
-            for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
-                opt.zero_grad()
-                loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
-                accelerator.backward(loss)
-                opt.step()
-                sched.step()
-                ema_decay = ema_sched.get_value()
-                
-                utils.ema_update(
-                    accelerator.unwrap_model(diffusion_model), 
-                    accelerator.unwrap_model(diffusion_model_ema),
-                    ema_decay
-                )
 
-                ema_sched.step()
+    while True:
+        for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
+            opt.zero_grad()
+            loss = accelerator.unwrap_model(diffusion_model).loss(batch[0])
+            accelerator.backward(loss)
+            opt.step()
+            sched.step()
+            ema_decay = ema_sched.get_value()
+            
+            utils.ema_update(
+                accelerator.unwrap_model(diffusion_model), 
+                accelerator.unwrap_model(diffusion_model_ema),
+                ema_decay
+            )
 
-                if accelerator.is_main_process:
-                    if step % 25 == 0:
-                        tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {loss.item():g}')
+            ema_sched.step()
 
-                    if use_wandb:
-                        log_dict = {
-                            'epoch': epoch,
-                            'loss': loss.item(),
-                            'lr': sched.get_last_lr()[0],
-                            'ema_decay': ema_decay,
-                        }
-                        wandb.log(log_dict, step=step)
+            if accelerator.is_main_process:
+                if step % 25 == 0:
+                    tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {loss.item():g}')
 
-                    if step % args.demo_every == 0:
-                        demo()
+                if use_wandb:
+                    log_dict = {
+                        'epoch': epoch,
+                        'loss': loss.item(),
+                        'lr': sched.get_last_lr()[0],
+                        'ema_decay': ema_decay,
+                    }
+                    wandb.log(log_dict, step=step)
 
-                if step > 0 and step % args.checkpoint_every == 0:
-                    save()
+                if step % args.demo_every == 0:
+                    demo()
 
-                step += 1
-            epoch += 1
-    except RuntimeError as err:
-            import requests
-            import datetime
-            ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-            resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id')
-            print(f'ERROR at {ts} on {resp.text} {device}: {type(err).__name__}: {err}', flush=True)
-            raise err
-    except KeyboardInterrupt:
-        pass
+            if step > 0 and step % args.checkpoint_every == 0:
+                save()
+
+            step += 1
+        epoch += 1
 
 if __name__ == '__main__':
     main()

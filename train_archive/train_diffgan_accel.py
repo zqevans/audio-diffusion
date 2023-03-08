@@ -432,15 +432,6 @@ def main():
 
                 step += 1
             epoch += 1
-    except RuntimeError as err:
-            import requests
-            import datetime
-            ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-            resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id')
-            print(f'ERROR at {ts} on {resp.text} {device}: {type(err).__name__}: {err}', flush=True)
-            raise err
-    except KeyboardInterrupt:
-        pass
 
 if __name__ == '__main__':
     main()

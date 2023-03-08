@@ -144,6 +144,7 @@ class LatentAudioDiffusionAutoencoder(pl.LightningModule):
         first_stage_latent_noise = torch.randn([latents.shape[0], self.latent_dim, latents.shape[2]*self.latent_downsampling_ratio]).to(device)
 
         first_stage_sampled = sample(self.diffusion, first_stage_latent_noise, steps, 0, latents)
+        first_stage_sampled = first_stage_sampled.clamp(-1, 1)
         decoded = self.autoencoder.decode(first_stage_sampled)
         return decoded
 
@@ -156,9 +157,10 @@ class StackedAELatentDiffusion(pl.LightningModule):
 
         self.diffusion = DiffusionAttnUnet1D(
             io_channels=self.latent_dim, 
-            n_attn_layers=5, 
+            n_attn_layers=6, 
             c_mults=[512] * 8,
-            depth=8
+            depth=8,
+            kernel_size=9
         )
 
         self.diffusion_ema = EMA(
@@ -302,7 +304,7 @@ def main():
     #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True, drop_last=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
@@ -350,6 +352,7 @@ def main():
         logger=wandb_logger,
         log_every_n_steps=1,
         max_epochs=10000000,
+        default_root_dir=args.save_dir
     )
 
     diffusion_trainer.fit(latent_diffusion_model, train_dl, ckpt_path=args.ckpt_path)

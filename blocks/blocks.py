@@ -64,13 +64,13 @@ class AdaGN(ConditionedModule):
         return torch.addcmul(utils.append_dims(bias, input.ndim), input, utils.append_dims(weight, input.ndim) + 1)
 
 class ResConvBlock(ResidualBlock):
-    def __init__(self, c_in, c_mid, c_out, is_last=False, kernel_size=5):
+    def __init__(self, c_in, c_mid, c_out, is_last=False, kernel_size=5, conv_bias=True):
         skip = None if c_in == c_out else nn.Conv1d(c_in, c_out, 1, bias=False)
         super().__init__([
-            nn.Conv1d(c_in, c_mid, kernel_size, padding=kernel_size//2),
+            nn.Conv1d(c_in, c_mid, kernel_size, padding=kernel_size//2, bias=conv_bias),
             nn.GroupNorm(1, c_mid),
             nn.GELU(),
-            nn.Conv1d(c_mid, c_out, kernel_size, padding=kernel_size//2),
+            nn.Conv1d(c_mid, c_out, kernel_size, padding=kernel_size//2, bias=conv_bias),
             nn.GroupNorm(1, c_out) if not is_last else nn.Identity(),
             nn.GELU() if not is_last else nn.Identity(),
         ], skip)

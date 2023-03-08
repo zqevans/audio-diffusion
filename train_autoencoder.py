@@ -31,7 +31,7 @@ from autoencoders.soundstream import SoundStreamXLEncoder, SoundStreamXLDecoder
 
 from diffusion.utils import PadCrop, Stereo
 
-from quantizer_pytorch import Quantizer1d
+#from quantizer_pytorch import Quantizer1d
 
 from aeiou.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
 
@@ -72,14 +72,15 @@ class AudioAutoencoder(pl.LightningModule):
 
         self.num_residuals = global_args.num_residuals
         if self.num_residuals > 0:
-            self.quantizer = Quantizer1d(
-                channels = global_args.latent_dim,
-                num_groups = 1,
-                codebook_size = global_args.codebook_size,
-                num_residuals = self.num_residuals,
-                shared_codebook = False,
-                expire_threshold=0.5
-            )
+            # self.quantizer = Quantizer1d(
+            #     channels = global_args.latent_dim,
+            #     num_groups = 1,
+            #     codebook_size = global_args.codebook_size,
+            #     num_residuals = self.num_residuals,
+            #     shared_codebook = False,
+            #     expire_threshold=0.5
+            # )
+            pass
 
       #  self.decoder_ema = deepcopy(self.diffusion)
         self.ema_decay = global_args.ema_decay

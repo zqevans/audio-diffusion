@@ -202,84 +202,74 @@ def main():
         }
         accelerator.save(obj, filename)
 
-    try:
-        while True:
-            for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
-                reals, _ = batch
-                #loss, log_dict = accelerator.unwrap_model(diffusion_model)(audios)
+    while True:
+        for batch in tqdm(train_dl, disable=not accelerator.is_main_process):
+            reals, _ = batch
+            #loss, log_dict = accelerator.unwrap_model(diffusion_model)(audios)
 
-                 # Draw uniformly distributed continuous timesteps
-                t = rng.draw(reals.shape[0])[:, 0].to(device)
+                # Draw uniformly distributed continuous timesteps
+            t = rng.draw(reals.shape[0])[:, 0].to(device)
 
-                print(f't: {t}')
+            print(f't: {t}')
 
-                t = get_crash_schedule(t)
+            t = get_crash_schedule(t)
 
-                # Calculate the noise schedule parameters for those timesteps
-                alphas, sigmas = get_alphas_sigmas(t)
+            # Calculate the noise schedule parameters for those timesteps
+            alphas, sigmas = get_alphas_sigmas(t)
 
-                # Combine the ground truth images and the noise
-                alphas = alphas[:, None, None]
-                sigmas = sigmas[:, None, None]
-                noise = torch.randn_like(reals)
-                print(f'noise: {noise}')
-                noised_reals = reals * alphas + noise * sigmas
-                targets = noise * alphas - reals * sigmas
+            # Combine the ground truth images and the noise
+            alphas = alphas[:, None, None]
+            sigmas = sigmas[:, None, None]
+            noise = torch.randn_like(reals)
+            print(f'noise: {noise}')
+            noised_reals = reals * alphas + noise * sigmas
+            targets = noise * alphas - reals * sigmas
 
-                with torch.cuda.amp.autocast():
-                    v = diffusion_model(noised_reals, t)
-                    print(v)
-                    mse_loss = F.mse_loss(v, targets)
-                    loss = mse_loss
-                    print(loss)
+            with torch.cuda.amp.autocast():
+                v = diffusion_model(noised_reals, t)
+                print(v)
+                mse_loss = F.mse_loss(v, targets)
+                loss = mse_loss
+                print(loss)
 
-                accelerator.backward(loss)
-                opt.step()
-                #sched.step()
-                opt.zero_grad()
+            accelerator.backward(loss)
+            opt.step()
+            #sched.step()
+            opt.zero_grad()
 
-                #if accelerator.sync_gradients:
-                ema_decay = ema_sched.get_value()
-                
-                utils.ema_update(
-                    diffusion_model,
-                    diffusion_model_ema,
-                    ema_decay
-                )
+            #if accelerator.sync_gradients:
+            ema_decay = ema_sched.get_value()
+            
+            utils.ema_update(
+                diffusion_model,
+                diffusion_model_ema,
+                ema_decay
+            )
 
-                ema_sched.step()
+            ema_sched.step()
 
-                if accelerator.is_main_process:
-                    if step % 25 == 0:
-                        tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {loss.item():g}')
+            if accelerator.is_main_process:
+                if step % 25 == 0:
+                    tqdm.write(f'Epoch: {epoch}, step: {step}, loss: {loss.item():g}')
 
-                    if use_wandb:
-                        log_dict = {
-                            'mse_loss': mse_loss.detach(),
-                            'epoch': epoch,
-                            'loss': loss.item(),
-                            #'lr': sched.get_last_lr()[0],
-                            'ema_decay': ema_decay,
-                        }
-                        wandb.log(log_dict, step=step)
+                if use_wandb:
+                    log_dict = {
+                        'mse_loss': mse_loss.detach(),
+                        'epoch': epoch,
+                        'loss': loss.item(),
+                        #'lr': sched.get_last_lr()[0],
+                        'ema_decay': ema_decay,
+                    }
+                    wandb.log(log_dict, step=step)
 
-                    if step % args.demo_every == 0:
-                        demo()
+                if step % args.demo_every == 0:
+                    demo()
 
-                if step > 0 and step % args.checkpoint_every == 0:
-                    save()
+            if step > 0 and step % args.checkpoint_every == 0:
+                save()
 
-                step += 1
-            epoch += 1
-    except RuntimeError as err:
-            import requests
-            import datetime
-            ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-            resp = requests.get('http://169.254.169.254/latest/meta-data/instance-id')
-            print(f'ERROR at {ts} on {resp.text} {device}: {type(err).__name__}: {err}', flush=True)
-            raise err
-    except KeyboardInterrupt:
-        pass
+            step += 1
+        epoch += 1
 
 if __name__ == '__main__':
     main()

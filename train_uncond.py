@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
 from prefigure.prefigure import get_all_args, push_wandb_config
-from contextlib import contextmanager
 from copy import deepcopy
 import math
-from pathlib import Path
 
 import sys
 import torch
@@ -16,20 +14,16 @@ import pytorch_lightning as pl
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from einops import rearrange
 
-from diffusion.pqmf import CachedPQMF as PQMF
 import torchaudio
-
-import auraloss
 
 import wandb
 
 from aeiou.datasets import AudioDataset
 
-from dataset.dataset import SampleDataset
 
 from decoders.diffusion_decoder import DiffusionAttnUnet1D
 from diffusion.model import ema_update
-from viz.viz import embeddings_table, pca_point_cloud, audio_spectrogram_image, tokens_spectrogram_image
+from viz.viz import audio_spectrogram_image
 
 
 # Define the noise schedule and sampling loop
@@ -97,15 +91,24 @@ class DiffusionUncond(pl.LightningModule):
         #self.diffusion = DiffusionAttnUnet1D(io_channels=2, pqmf_bands=global_args.pqmf_bands, n_attn_layers=4)
 
         self.diffusion = DiffusionAttnUnet1D(
-            io_channels=2, 
-            pqmf_bands = global_args.pqmf_bands, 
             n_attn_layers=4,
         )
+
+        # self.diffusion = DiffusionAttnUnet1D(
+        #     io_channels=2, 
+        #     pqmf_bands = global_args.pqmf_bands, 
+        #     c_mults = [128, 128, 256, 512, 1024],
+        #     learned_resample = True,
+        #     strides = [4, 4, 4, 4, 8],
+        #     kernel_size=7,
+        #     depth=5,
+        #     n_attn_layers=0
+        # )
 
         self.diffusion_ema = deepcopy(self.diffusion)
         self.rng = torch.quasirandom.SobolEngine(1, scramble=True, seed=global_args.seed)
         self.ema_decay = global_args.ema_decay
-        
+
     def configure_optimizers(self):
         return optim.Adam([*self.diffusion.parameters()], lr=4e-5)
   
@@ -115,7 +118,7 @@ class DiffusionUncond(pl.LightningModule):
         # Draw uniformly distributed continuous timesteps
         t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
 
-        t = get_crash_schedule(t)
+        #t = get_crash_schedule(t)
 
         # Calculate the noise schedule parameters for those timesteps
         alphas, sigmas = get_alphas_sigmas(t)
@@ -130,7 +133,7 @@ class DiffusionUncond(pl.LightningModule):
         with torch.cuda.amp.autocast():
             v = self.diffusion(noised_reals, t)
             mse_loss = F.mse_loss(v, targets)
-            loss = mse_loss
+            loss = mse_loss + stft_loss
 
         log_dict = {
             'train/loss': loss.detach(),
@@ -146,7 +149,7 @@ class DiffusionUncond(pl.LightningModule):
 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
-        print(f'{type(err).__name__}: {err}', file=sys.stderr)
+        print(f'{type(err).__name__}: {err}')
 
 
 class DemoCallback(pl.Callback):
@@ -203,7 +206,7 @@ def main():
 
     args.latent_dim = 0
 
-    args.random_crop = False
+    #args.random_crop = False
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device:', device)
@@ -220,7 +223,7 @@ def main():
     #train_set = SampleDataset([args.training_dir], args, keywords=["kick", "snare", "clap", "snap", "hat", "cymbal", "crash", "ride"])
 
     train_dl = data.DataLoader(train_set, args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True)
+                               num_workers=args.num_workers, persistent_workers=True, pin_memory=True, drop_last=True)
     wandb_logger = pl.loggers.WandbLogger(project=args.name)
     exc_callback = ExceptionCallback()
     ckpt_callback = pl.callbacks.ModelCheckpoint(every_n_train_steps=args.checkpoint_every, save_top_k=-1)
