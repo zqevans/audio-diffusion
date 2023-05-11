@@ -35,6 +35,5 @@ setup(
         'vector-quantize-pytorch',
         'wandb',
         'cached_conv @ git+https://github.com/caillonantoine/cached_conv.git',
-        'udls @ git+https://github.com/caillonantoine/UDLS.git',
     ],
 )
