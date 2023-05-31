@@ -25,6 +25,6 @@ setup(
         'wandb',
  #       'jukebox @ git+https://github.com/drscotthawley/jukebox.git',
         'cached_conv',
-        'udls @ git+https://github.com/caillonantoine/UDLS.git',
+        'udls',
     ],
 )
